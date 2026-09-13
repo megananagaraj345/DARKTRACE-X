@@ -5,3 +5,5 @@ python-dotenv
 sqlalchemy
 psycopg2-binary
 neo4j
+python-multipart
+reportlab
