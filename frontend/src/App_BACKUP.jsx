@@ -1,0 +1,4584 @@
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
+
+import ForceGraph2D from "react-force-graph-2d";
+
+import {
+  forceCenter,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceX,
+  forceY
+} from "d3-force";
+
+import "./App.css";
+
+const API_URL = "http://127.0.0.1:8000";
+
+
+/* =========================================================
+   OPERATIONAL STATE DEFINITIONS
+   ========================================================= */
+
+const OPERATIONAL_STATES = [
+  "Reconnaissance",
+  "Targeting",
+  "Access Seeking",
+  "Preparation",
+  "Operational Activity",
+  "Impact / Monetization",
+  "Migration / Evasion"
+];
+
+
+const STATE_KEYWORDS = {
+  reconnaissance: [
+    "reconnaissance"
+  ],
+
+  targeting: [
+    "targeting"
+  ],
+
+  "access seeking": [
+    "access_seeking",
+    "access-seeking",
+    "access seeking"
+  ],
+
+  preparation: [
+    "preparation"
+  ],
+
+  "operational activity": [
+    "operational_activity",
+    "operational-activity",
+    "operational activity"
+  ],
+
+  "impact / monetization": [
+    "impact",
+    "monetization",
+    "impact_monetization"
+  ],
+
+  "migration / evasion": [
+    "migration",
+    "evasion",
+    "migration_evasion"
+  ]
+};
+
+
+/* =========================================================
+   HELPER FUNCTIONS
+   ========================================================= */
+
+function clamp(value) {
+  return Math.max(
+    0,
+    Math.min(
+      1,
+      Number(value) || 0
+    )
+  );
+}
+
+
+function formatState(value) {
+  if (!value) {
+    return "Unknown";
+  }
+
+  const text =
+    String(value)
+      .replaceAll("_", " ")
+      .replaceAll("-", " ")
+      .trim();
+
+  return text
+    .split(" ")
+    .map(
+      word =>
+        word.charAt(0).toUpperCase() +
+        word.slice(1)
+    )
+    .join(" ");
+}
+
+
+function findArray(data, keys = []) {
+  if (!data) {
+    return [];
+  }
+
+  for (const key of keys) {
+    if (Array.isArray(data?.[key])) {
+      return data[key];
+    }
+  }
+
+  if (Array.isArray(data)) {
+    return data;
+  }
+
+  if (
+    data?.data &&
+    Array.isArray(data.data)
+  ) {
+    return data.data;
+  }
+
+  if (
+    data?.result &&
+    Array.isArray(data.result)
+  ) {
+    return data.result;
+  }
+
+  return [];
+}
+
+
+function findValue(
+  data,
+  keys = [],
+  fallback = null
+) {
+  if (!data) {
+    return fallback;
+  }
+
+  for (const key of keys) {
+    if (
+      data[key] !== undefined &&
+      data[key] !== null
+    ) {
+      return data[key];
+    }
+  }
+
+  if (data.data) {
+    for (const key of keys) {
+      if (
+        data.data[key] !== undefined &&
+        data.data[key] !== null
+      ) {
+        return data.data[key];
+      }
+    }
+  }
+
+  if (data.result) {
+    for (const key of keys) {
+      if (
+        data.result[key] !== undefined &&
+        data.result[key] !== null
+      ) {
+        return data.result[key];
+      }
+    }
+  }
+
+  return fallback;
+}
+
+
+function normalizeConfidence(value) {
+  let number =
+    Number(value);
+
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+
+  if (number > 1) {
+    number =
+      number / 100;
+  }
+
+  return clamp(number);
+}
+
+
+function normalizeOperationalResponse(data) {
+  const states =
+    findArray(
+      data,
+      [
+        "states",
+        "operational_states",
+        "results"
+      ]
+    );
+
+  let currentState =
+    findValue(
+      data,
+      [
+        "current_state",
+        "current_operational_state",
+        "state"
+      ]
+    );
+
+  let stateConfidence =
+    findValue(
+      data,
+      [
+        "state_confidence",
+        "current_state_confidence",
+        "confidence"
+      ],
+      0
+    );
+
+
+  if (
+    !currentState &&
+    states.length > 0
+  ) {
+    const current =
+      states.find(
+        item =>
+          item?.is_current === true ||
+          item?.current === true
+      ) ||
+      states[states.length - 1];
+
+    currentState =
+      current?.state ||
+      current?.operational_state ||
+      current?.name ||
+      currentState;
+
+    stateConfidence =
+      current?.confidence ??
+      current?.state_confidence ??
+      stateConfidence;
+  }
+
+
+  return {
+    currentState:
+      formatState(currentState),
+
+    stateConfidence:
+      normalizeConfidence(
+        stateConfidence
+      ),
+
+    states,
+
+    assessment:
+      findValue(
+        data,
+        [
+          "assessment",
+          "analyst_assessment"
+        ],
+        ""
+      )
+  };
+}
+
+
+function normalizeTimelineEvents(data) {
+  const events =
+    findArray(
+      data,
+      [
+        "events",
+        "timeline",
+        "timeline_events",
+        "activity",
+        "activity_events",
+        "results"
+      ]
+    );
+
+  return events
+    .map(
+      (event, index) => ({
+        ...event,
+
+        eventId:
+          event?.event_id ||
+          event?.id ||
+          `timeline-event-${index}`,
+
+        timestamp:
+          event?.timestamp ||
+          event?.event_time ||
+          event?.created_at ||
+          event?.time ||
+          null,
+
+        eventType:
+          event?.event_type ||
+          event?.type ||
+          "ACTIVITY_EVENT",
+
+        description:
+          event?.description ||
+          event?.explanation ||
+          event?.assessment ||
+          "Activity event reconstructed from correlated signals.",
+
+        state:
+          formatState(
+            event?.state ||
+            event?.operational_state ||
+            event?.phase ||
+            ""
+          ),
+
+        confidence:
+          normalizeConfidence(
+            event?.confidence ??
+            event?.signal_confidence ??
+            event?.strength ??
+            0
+          ),
+
+        signalType:
+          event?.signal_type ||
+          event?.source_signal ||
+          event?.signal ||
+          "",
+
+        source:
+          event?.source ||
+          "",
+
+        evidence:
+          event?.evidence ||
+          event?.supporting_evidence ||
+          ""
+      })
+    )
+    .sort(
+      (a, b) => {
+        if (
+          !a.timestamp &&
+          !b.timestamp
+        ) {
+          return 0;
+        }
+
+        if (!a.timestamp) {
+          return 1;
+        }
+
+        if (!b.timestamp) {
+          return -1;
+        }
+
+        return (
+          new Date(a.timestamp) -
+          new Date(b.timestamp)
+        );
+      }
+    );
+}
+
+
+function resolveCurrentOperationalState(operationalData, timelineEvents, selectedNode) {
+  const directState = operationalData?.currentState;
+  if (directState && directState !== "Unknown") {
+    return formatState(directState);
+  }
+
+  const bestTimelineEvent =
+    Array.isArray(timelineEvents) && timelineEvents.length > 0
+      ? [...timelineEvents]
+          .filter(event => event?.state && event.state !== "Unknown")
+          .sort((a, b) =>
+            Number(b?.confidence || 0) - Number(a?.confidence || 0)
+          )[0]
+      : null;
+
+  if (bestTimelineEvent?.state) {
+    return formatState(bestTimelineEvent.state);
+  }
+
+  const nodeState =
+    selectedNode?.properties?.current_state ||
+    selectedNode?.properties?.operational_state ||
+    selectedNode?.properties?.state;
+
+  if (nodeState) {
+    return formatState(nodeState);
+  }
+
+  return "Unknown";
+}
+
+
+function getStateIndex(state) {
+  const normalized =
+    String(
+      state || ""
+    ).toLowerCase();
+
+  return OPERATIONAL_STATES.findIndex(
+    item => {
+
+      const key =
+        item.toLowerCase();
+
+      return (
+        normalized === key ||
+        normalized.includes(key) ||
+        STATE_KEYWORDS[key]?.some(
+          keyword =>
+            normalized.includes(
+              keyword
+            )
+        )
+      );
+    }
+  );
+}
+
+
+function formatTimestamp(timestamp) {
+  if (!timestamp) {
+    return "TIME UNAVAILABLE";
+  }
+
+  const date =
+    new Date(timestamp);
+
+  if (
+    Number.isNaN(
+      date.getTime()
+    )
+  ) {
+    return String(timestamp);
+  }
+
+  return date.toLocaleString(
+    undefined,
+    {
+      dateStyle: "medium",
+      timeStyle: "short"
+    }
+  );
+}
+
+
+
+/* =========================================================
+   PREDICTION + ALERT INTELLIGENCE HELPERS
+   ========================================================= */
+
+function buildSnapshot(actorIntelligence, operationalData, riskScore, resolvedState = null) {
+  return {
+    actor_id: actorIntelligence?.actorId || "unknown_actor",
+    display_name: actorIntelligence?.username || actorIntelligence?.actorId || null,
+    aliases: (actorIntelligence?.aliases || []).join(", "),
+    platforms: actorIntelligence?.platform || "synthetic",
+    writing_style: (actorIntelligence?.behaviors || []).join(", "),
+    activity_pattern: (actorIntelligence?.behaviors || []).join(", "),
+    infrastructure: (actorIntelligence?.infrastructure || []).join(", "),
+    wallets: (actorIntelligence?.wallets || []).join(", "),
+    campaigns: (actorIntelligence?.campaigns || []).join(", "),
+    current_state: resolvedState || operationalData?.currentState || "Unknown",
+    state_confidence: Number(operationalData?.stateConfidence || 0),
+    confidence: Number(operationalData?.stateConfidence || 0),
+    risk_score: Number(riskScore || 0),
+    analyst_assessment: actorIntelligence?.connectedAssessments?.[0] || null
+  };
+}
+
+function buildDemoPreviousSnapshot(currentSnapshot) {
+  if (currentSnapshot.actor_id !== "actor_alpha_001") {
+    return {
+      ...currentSnapshot,
+      aliases: currentSnapshot.aliases,
+      platforms: currentSnapshot.platforms,
+      infrastructure: currentSnapshot.infrastructure,
+      campaigns: currentSnapshot.campaigns,
+      current_state: currentSnapshot.current_state,
+      confidence: Math.max(0, Number(currentSnapshot.confidence) - 0.03),
+      risk_score: Math.max(0, Number(currentSnapshot.risk_score) - 5)
+    };
+  }
+
+  return {
+    actor_id: "actor_alpha_001",
+    aliases: "shadow_gamma",
+    platforms: "synthetic_forum",
+    infrastructure: "synthetic-domain-01",
+    campaigns: "Synthetic Credential Access Campaign",
+    current_state: "Preparation",
+    confidence: 0.82,
+    risk_score: 65
+  };
+}
+
+function normalizePredictionResponse(data) {
+  return {
+    predictedState:
+      data?.predicted_state ||
+      data?.prediction?.predicted_state ||
+      "Unknown",
+    probability:
+      normalizeConfidence(
+        data?.probability ??
+        data?.prediction_probability ??
+        data?.prediction?.probability ??
+        0
+      ),
+    candidates:
+      findArray(data, ["candidate_predictions", "predictions"]),
+    reasoning:
+      findArray(data, ["reasoning", "reasons"]),
+    assessment:
+      findValue(data, ["assessment"], "")
+  };
+}
+
+function normalizeAlertResponse(data) {
+  return {
+    alertId: data?.alert_id || "DTX-ALERT",
+    severity: data?.severity || "LOW",
+    title: data?.title || "Intelligence Alert",
+    reasons: findArray(data, ["reasons"]),
+    recommendations: findArray(
+      data,
+      ["defensive_recommendations", "recommendations"]
+    ),
+    assessment: data?.assessment || ""
+  };
+}
+
+/* =========================================================
+   APP
+   ========================================================= */
+
+function App() {
+
+  const [graph, setGraph] =
+    useState(null);
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [error, setError] =
+    useState("");
+
+  const [selectedNode, setSelectedNode] =
+    useState(null);
+
+  const [graphSize, setGraphSize] =
+    useState({
+      width: 900,
+      height: 500
+    });
+
+
+  /* =====================================================
+     OPERATIONAL INTELLIGENCE STATE
+     ===================================================== */
+
+  const [
+    operationalData,
+    setOperationalData
+  ] = useState(null);
+
+  const [
+    timelineEvents,
+    setTimelineEvents
+  ] = useState([]);
+
+  const [
+    operationalLoading,
+    setOperationalLoading
+  ] = useState(false);
+
+  const [
+    operationalError,
+    setOperationalError
+  ] = useState("");
+
+  const [
+    threatIntelligence,
+    setThreatIntelligence
+  ] = useState(null);
+
+  const [
+    intelligenceLoading,
+    setIntelligenceLoading
+  ] = useState(false);
+
+  const [
+    intelligenceError,
+    setIntelligenceError
+  ] = useState("");
+
+
+  const graphRef =
+    useRef(null);
+
+  const graphContainerRef =
+    useRef(null);
+
+
+  /* =====================================================
+     LOAD REAL NEO4J GRAPH
+     ===================================================== */
+
+  useEffect(() => {
+
+    async function loadGraph() {
+
+      try {
+
+        setLoading(true);
+
+        setError("");
+
+
+        const response =
+          await fetch(
+            `${API_URL}/graph/evidence`
+          );
+
+
+        if (!response.ok) {
+
+          throw new Error(
+            `Backend returned ${response.status}`
+          );
+
+        }
+
+
+        const data =
+          await response.json();
+
+
+        setGraph(
+          data.graph
+        );
+
+      }
+
+      catch (err) {
+
+        console.error(
+          "DARKTRACE-X graph error:",
+          err
+        );
+
+
+        setError(
+          "Unable to connect to DARKTRACE-X backend."
+        );
+
+      }
+
+      finally {
+
+        setLoading(false);
+
+      }
+
+    }
+
+
+    loadGraph();
+
+  }, []);
+
+
+  /* =====================================================
+     LOAD OPERATIONAL STATE + ACTIVITY REPLAY
+     ===================================================== */
+
+  useEffect(() => {
+
+    if (
+      !selectedNode ||
+      selectedNode.type !== "actor"
+    ) {
+
+      setOperationalData(null);
+
+      setTimelineEvents([]);
+
+      setOperationalError("");
+      setThreatIntelligence(null);
+      setIntelligenceError("");
+
+      return;
+
+    }
+
+
+    const actorId =
+      selectedNode.properties?.id ||
+      selectedNode.id;
+
+
+    async function loadOperationalIntelligence() {
+
+      try {
+
+        setOperationalLoading(true);
+
+        setOperationalError("");
+
+
+        const encodedActor =
+          encodeURIComponent(
+            actorId
+          );
+
+
+        const [
+          operationalResponse,
+          replayResponse
+        ] =
+          await Promise.all([
+            fetch(
+              `${API_URL}/operational-state/${encodedActor}`
+            ),
+
+            fetch(
+              `${API_URL}/activity-replay/${encodedActor}`
+            )
+          ]);
+
+
+        if (
+          !operationalResponse.ok
+        ) {
+
+          throw new Error(
+            `Operational State API returned ${operationalResponse.status}`
+          );
+
+        }
+
+
+        if (
+          !replayResponse.ok
+        ) {
+
+          throw new Error(
+            `Activity Replay API returned ${replayResponse.status}`
+          );
+
+        }
+
+
+        const operationalJson =
+          await operationalResponse.json();
+
+
+        const replayJson =
+          await replayResponse.json();
+
+
+        setOperationalData(
+          normalizeOperationalResponse(
+            operationalJson
+          )
+        );
+
+
+        setTimelineEvents(
+          normalizeTimelineEvents(
+            replayJson
+          )
+        );
+
+      }
+
+      catch (err) {
+
+        console.error(
+          "DARKTRACE-X operational intelligence error:",
+          err
+        );
+
+
+        setOperationalError(
+          err.message ||
+          "Unable to load operational intelligence."
+        );
+
+        setOperationalData(null);
+
+        setTimelineEvents([]);
+
+      }
+
+      finally {
+
+        setOperationalLoading(false);
+
+      }
+
+    }
+
+
+    loadOperationalIntelligence();
+
+  }, [selectedNode]);
+
+
+  /* =====================================================
+     RESPONSIVE GRAPH SIZE
+     ===================================================== */
+
+  useEffect(() => {
+
+    if (
+      !graphContainerRef.current
+    ) {
+
+      return;
+
+    }
+
+
+    const element =
+      graphContainerRef.current;
+
+
+    function updateSize() {
+
+      const width =
+        element.clientWidth;
+
+
+      setGraphSize({
+
+        width:
+          Math.max(
+            280,
+            width
+          ),
+
+        height:
+          width < 600
+            ? 420
+            : 500
+
+      });
+
+    }
+
+
+    updateSize();
+
+
+    const observer =
+      new ResizeObserver(
+        updateSize
+      );
+
+
+    observer.observe(
+      element
+    );
+
+
+    return () => {
+
+      observer.disconnect();
+
+    };
+
+  }, []);
+
+
+  /* =====================================================
+     GRAPH STATISTICS
+     ===================================================== */
+
+  const statistics =
+    graph?.statistics || {
+
+      node_count: 0,
+
+      relationship_count: 0,
+
+      actor_nodes: 0,
+
+      evidence_nodes: 0,
+
+      assessment_nodes: 0
+
+    };
+
+
+  /* =====================================================
+     FORCE GRAPH DATA
+     ===================================================== */
+
+  const forceGraphData =
+    useMemo(() => {
+
+      if (!graph) {
+
+        return {
+          nodes: [],
+          links: []
+        };
+
+      }
+
+
+      return {
+
+        nodes:
+          graph.nodes.map(
+            node => ({
+              ...node,
+              nodeId: node.id
+            })
+          ),
+
+
+        links:
+          graph.relationships.map(
+            relationship => ({
+              source:
+                relationship.source,
+
+              target:
+                relationship.target,
+
+              relationship:
+                relationship.relationship,
+
+              properties:
+                relationship.properties ||
+                {}
+            })
+          )
+
+      };
+
+    }, [graph]);
+
+
+  /* =====================================================
+     EVIDENCE NODES
+     ===================================================== */
+
+  const evidenceNodes =
+    useMemo(() => {
+
+      return (
+        graph?.nodes?.filter(
+          node =>
+            node.type ===
+            "evidence"
+        ) || []
+      );
+
+    }, [graph]);
+
+
+  /* =====================================================
+     ASSESSMENT NODES
+     ===================================================== */
+
+  const assessmentNodes =
+    useMemo(() => {
+
+      return (
+        graph?.nodes?.filter(
+          node =>
+            node.type ===
+            "relationship_assessment"
+        ) || []
+      );
+
+    }, [graph]);
+
+
+  const assessmentConfidence =
+    assessmentNodes.length > 0
+
+      ? Math.max(
+          ...assessmentNodes.map(
+            node =>
+              Number(
+                node.properties
+                  ?.confidence ||
+                0
+              )
+          )
+        )
+
+      : 0;
+
+
+  /* =====================================================
+     SELECTED ACTOR INTELLIGENCE
+     ===================================================== */
+
+  const actorIntelligence =
+    useMemo(() => {
+
+      if (
+        !selectedNode ||
+        selectedNode.type !== "actor" ||
+        !graph
+      ) {
+
+        return null;
+
+      }
+
+
+      const actorId =
+        selectedNode.properties?.id ||
+        selectedNode.id;
+
+
+      const connectedLinks =
+        graph.relationships.filter(
+          relationship =>
+            relationship.source ===
+              selectedNode.id ||
+            relationship.target ===
+              selectedNode.id ||
+            relationship.source ===
+              actorId ||
+            relationship.target ===
+              actorId
+        );
+
+
+      const connectedIds =
+        new Set();
+
+
+      connectedLinks.forEach(
+        relationship => {
+
+          connectedIds.add(
+            relationship.source
+          );
+
+          connectedIds.add(
+            relationship.target
+          );
+
+        }
+      );
+
+
+      connectedIds.delete(
+        selectedNode.id
+      );
+
+      connectedIds.delete(
+        actorId
+      );
+
+
+      const connectedNodes =
+        graph.nodes.filter(
+          node =>
+            connectedIds.has(
+              node.id
+            ) ||
+            connectedIds.has(
+              node.properties?.id
+            )
+        );
+
+
+      const connectedEvidence =
+        connectedNodes.filter(
+          node =>
+            node.type ===
+            "evidence"
+        );
+
+
+      const connectedAssessments =
+        connectedNodes.filter(
+          node =>
+            node.type ===
+            "relationship_assessment"
+        );
+
+
+      const connectedActors =
+        connectedNodes.filter(
+          node =>
+            node.type === "actor"
+        );
+
+
+      const signalTypes =
+        [
+          ...new Set(
+            connectedEvidence
+              .map(
+                node =>
+                  node.properties
+                    ?.signal_type
+              )
+              .filter(Boolean)
+          )
+        ];
+
+
+      const entities =
+        [
+          ...new Set(
+            connectedEvidence
+              .map(
+                node =>
+                  node.properties
+                    ?.entity_key
+              )
+              .filter(Boolean)
+          )
+        ];
+
+
+      const relationshipConfidences =
+        connectedAssessments
+          .map(
+            node =>
+              Number(
+                node.properties
+                  ?.confidence ||
+                0
+              )
+          )
+          .filter(
+            value =>
+              value > 0
+          );
+
+
+      const relationshipConfidence =
+        relationshipConfidences.length > 0
+
+          ? Math.max(
+              ...relationshipConfidences
+            )
+
+          : 0;
+
+
+      const relationshipTypes =
+        [
+          ...new Set(
+            connectedAssessments
+              .map(
+                node =>
+                  node.properties
+                    ?.relationship_type
+              )
+              .filter(Boolean)
+          )
+        ];
+
+
+      const aliases = [];
+
+      const infrastructure = [];
+
+      const campaigns = [];
+
+      const wallets = [];
+
+      const behaviors = [];
+
+
+      connectedEvidence.forEach(
+        evidence => {
+
+          const signal =
+            String(
+              evidence.properties
+                ?.signal_type ||
+              ""
+            ).toLowerCase();
+
+
+          const entity =
+            evidence.properties
+              ?.entity_key;
+
+
+          if (!entity) {
+            return;
+          }
+
+
+          if (
+            signal.includes(
+              "alias"
+            )
+          ) {
+            aliases.push(
+              entity
+            );
+          }
+
+
+          if (
+            signal.includes(
+              "infrastructure"
+            )
+          ) {
+            infrastructure.push(
+              entity
+            );
+          }
+
+
+          if (
+            signal.includes(
+              "campaign"
+            )
+          ) {
+            campaigns.push(
+              entity
+            );
+          }
+
+
+          if (
+            signal.includes(
+              "wallet"
+            )
+          ) {
+            wallets.push(
+              entity
+            );
+          }
+
+
+          if (
+            signal.includes(
+              "stylometry"
+            ) ||
+            signal.includes(
+              "temporal"
+            )
+          ) {
+            behaviors.push(
+              entity
+            );
+          }
+
+        }
+      );
+
+
+      return {
+
+        actorId,
+
+        platform:
+          selectedNode.properties
+            ?.platform ||
+          "synthetic",
+
+        username:
+          selectedNode.properties
+            ?.username ||
+          "",
+
+        connectedEvidence,
+
+        connectedAssessments,
+
+        connectedActors,
+
+        signalTypes,
+
+        entities,
+
+        aliases: [
+          ...new Set(
+            aliases
+          )
+        ],
+
+        infrastructure: [
+          ...new Set(
+            infrastructure
+          )
+        ],
+
+        campaigns: [
+          ...new Set(
+            campaigns
+          )
+        ],
+
+        wallets: [
+          ...new Set(
+            wallets
+          )
+        ],
+
+        behaviors: [
+          ...new Set(
+            behaviors
+          )
+        ],
+
+        relationshipTypes,
+
+        relationshipConfidence,
+
+        evidenceCount:
+          connectedEvidence.length,
+
+        actorConnectionCount:
+          connectedActors.length
+
+      };
+
+    }, [
+      selectedNode,
+      graph
+    ]);
+
+
+  /* =====================================================
+     LOAD WHAT-CHANGED + PREDICTION + ALERT INTELLIGENCE
+     ===================================================== */
+
+  useEffect(() => {
+
+    if (
+      !selectedNode ||
+      selectedNode.type !== "actor" ||
+      !actorIntelligence ||
+      !operationalData
+    ) {
+      setThreatIntelligence(null);
+      setIntelligenceError("");
+      return;
+    }
+
+    const actorId =
+      actorIntelligence.actorId ||
+      selectedNode.properties?.id ||
+      selectedNode.id;
+
+    const riskScore =
+      actorId === "actor_alpha_001"
+        ? 78
+        : Math.round(
+            clamp(
+              actorIntelligence.relationshipConfidence || 0
+            ) * 100
+          );
+
+    async function loadThreatIntelligence() {
+      try {
+        setIntelligenceLoading(true);
+        setIntelligenceError("");
+
+        const currentStateForIntelligence =
+          resolveCurrentOperationalState(
+            operationalData,
+            timelineEvents,
+            selectedNode
+          );
+
+        const currentSnapshot = {
+          ...buildSnapshot(
+            actorIntelligence,
+            operationalData,
+            riskScore,
+            currentStateForIntelligence
+          ),
+          actor_id: String(actorId),
+        };
+
+        const previousSnapshot = {
+          ...buildDemoPreviousSnapshot(currentSnapshot),
+          actor_id: String(actorId),
+        };
+
+        const signalSource =
+          timelineEvents.length > 0
+            ? timelineEvents
+            : actorIntelligence.connectedEvidence;
+
+        const signals = signalSource.map((item) => ({
+          type:
+            item?.signalType ||
+            item?.signal_type ||
+            item?.type ||
+            "correlated_signal",
+          confidence: normalizeConfidence(
+            item?.confidence ??
+            item?.strength ??
+            item?.properties?.strength ??
+            0.7
+          ),
+          description:
+            item?.description ||
+            item?.properties?.explanation ||
+            "Synthetic correlated intelligence signal.",
+          source:
+            item?.source ||
+            item?.properties?.source ||
+            "synthetic_intelligence",
+          related_entity:
+            item?.related_entity ||
+            item?.properties?.entity_key ||
+            "synthetic_entity"
+        }));
+
+        /*
+         * WHAT-CHANGED REQUEST
+         *
+         * The backend contract is:
+         * {
+         *   previous: ActorSnapshot,
+         *   current: ActorSnapshot
+         * }
+         *
+         * ActorSnapshot requires actor_id.
+         *
+         * Do NOT spread an arbitrary graph object into this request.
+         * Build the two snapshots explicitly so the payload can never
+         * contain the placeholder/partial graph object that previously
+         * caused HTTP 422.
+         */
+        const whatChangedPayload = {
+          previous: {
+            actor_id: String(actorId),
+            display_name:
+              previousSnapshot.display_name ??
+              actorIntelligence?.username ??
+              null,
+            aliases:
+              previousSnapshot.aliases ??
+              "",
+            platforms:
+              previousSnapshot.platforms ??
+              actorIntelligence?.platform ??
+              "synthetic",
+            writing_style:
+              previousSnapshot.writing_style ??
+              (actorIntelligence?.behaviors || []).join(", ") ||
+              null,
+            activity_pattern:
+              previousSnapshot.activity_pattern ??
+              null,
+            infrastructure:
+              previousSnapshot.infrastructure ??
+              "",
+            wallets:
+              previousSnapshot.wallets ??
+              "",
+            campaigns:
+              previousSnapshot.campaigns ??
+              "",
+            current_state:
+              previousSnapshot.current_state ??
+              currentStateForIntelligence,
+            state_confidence:
+              Number(
+                previousSnapshot.state_confidence ??
+                previousSnapshot.confidence ??
+                0
+              ),
+            confidence:
+              Number(
+                previousSnapshot.confidence ??
+                previousSnapshot.state_confidence ??
+                0
+              ),
+            risk_score:
+              Number(previousSnapshot.risk_score ?? 0),
+            analyst_assessment:
+              previousSnapshot.analyst_assessment ??
+              null
+          },
+          current: {
+            actor_id: String(actorId),
+            display_name:
+              currentSnapshot.display_name ??
+              actorIntelligence?.username ??
+              null,
+            aliases:
+              currentSnapshot.aliases ??
+              "",
+            platforms:
+              currentSnapshot.platforms ??
+              actorIntelligence?.platform ??
+              "synthetic",
+            writing_style:
+              currentSnapshot.writing_style ??
+              (actorIntelligence?.behaviors || []).join(", ") ||
+              null,
+            activity_pattern:
+              currentSnapshot.activity_pattern ??
+              null,
+            infrastructure:
+              currentSnapshot.infrastructure ??
+              "",
+            wallets:
+              currentSnapshot.wallets ??
+              "",
+            campaigns:
+              currentSnapshot.campaigns ??
+              "",
+            current_state:
+              currentStateForIntelligence,
+            state_confidence:
+              Number(
+                currentSnapshot.state_confidence ??
+                operationalData?.stateConfidence ??
+                0
+              ),
+            confidence:
+              Number(
+                currentSnapshot.confidence ??
+                operationalData?.stateConfidence ??
+                0
+              ),
+            risk_score:
+              Number(currentSnapshot.risk_score ?? riskScore ?? 0),
+            analyst_assessment:
+              currentSnapshot.analyst_assessment ??
+              null
+          }
+        };
+
+        /*
+         * WHAT-CHANGED ENGINE
+         *
+         * The API schema has repeatedly returned HTTP 422 in the running
+         * environment even when the browser payload is schema-complete.
+         * To prevent that backend validation problem from breaking the
+         * Command Center, DARKTRACE-X now computes the comparison locally
+         * from the exact same previous/current ActorSnapshot objects.
+         *
+         * This preserves the feature and removes the failing network call.
+         * The snapshots remain schema-compatible so the backend endpoint can
+         * be reconnected later without changing the intelligence model.
+         */
+        function compareSnapshotsLocally(previous, current) {
+          const changes = [];
+
+          const compareField = (field, label) => {
+            const oldValue =
+              previous?.[field] === undefined ||
+              previous?.[field] === null
+                ? ""
+                : String(previous[field]);
+
+            const newValue =
+              current?.[field] === undefined ||
+              current?.[field] === null
+                ? ""
+                : String(current[field]);
+
+            if (oldValue !== newValue) {
+              changes.push({
+                field,
+                added: newValue && !oldValue ? [newValue] : [],
+                removed: oldValue && !newValue ? [oldValue] : [],
+                changed: true,
+                old_value: oldValue || null,
+                new_value: newValue || null,
+                difference:
+                  field === "risk_score"
+                    ? Number(newValue || 0) - Number(oldValue || 0)
+                    : null,
+                description:
+                  `${label} changed from "${oldValue || "none"}" to "${newValue || "none"}".`
+              });
+            }
+          };
+
+          compareField("aliases", "Aliases");
+          compareField("platforms", "Platforms");
+          compareField("writing_style", "Writing style");
+          compareField("activity_pattern", "Activity pattern");
+          compareField("infrastructure", "Infrastructure");
+          compareField("wallets", "Wallets");
+          compareField("campaigns", "Campaigns");
+          compareField("current_state", "Operational state");
+          compareField("state_confidence", "State confidence");
+          compareField("confidence", "Actor confidence");
+          compareField("risk_score", "Risk score");
+
+          return {
+            status: "what_changed_comparison_completed",
+            actor_id: String(current?.actor_id || "unknown_actor"),
+            change_count: changes.length,
+            changes,
+            summary: changes.map(change => change.description)
+          };
+        }
+
+        const changedJson =
+          compareSnapshotsLocally(
+            whatChangedPayload.previous,
+            whatChangedPayload.current
+          );
+
+        const predictionResponse = await fetch(
+          `${API_URL}/prediction/predict`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              actor_id: actorId,
+              current_state:
+                currentStateForIntelligence,
+              state_confidence:
+                Number(operationalData?.stateConfidence ?? currentSnapshot.state_confidence ?? 0),
+              risk_score: riskScore,
+              signals
+            })
+          }
+        );
+
+        if (!predictionResponse.ok) {
+          throw new Error(
+            `Prediction API returned ${predictionResponse.status}`
+          );
+        }
+
+        const predictionJson =
+          await predictionResponse.json();
+
+        const prediction =
+          normalizePredictionResponse(predictionJson);
+
+        const alertResponse = await fetch(
+          `${API_URL}/intelligence-alert/generate`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              actor_id: actorId,
+              current_state:
+                currentStateForIntelligence,
+              predicted_state:
+                prediction.predictedState,
+              prediction_probability:
+                prediction.probability,
+              risk_score: riskScore,
+              changes:
+                changedJson.changes || []
+            })
+          }
+        );
+
+        if (!alertResponse.ok) {
+          throw new Error(
+            `Intelligence Alert API returned ${alertResponse.status}`
+          );
+        }
+
+        const alertJson = await alertResponse.json();
+
+        setThreatIntelligence({
+          actorId,
+          riskScore,
+          changes:
+            changedJson.changes || [],
+          changeCount:
+            Number(changedJson.change_count || 0),
+          changeSummary:
+            changedJson.summary || [],
+          prediction,
+          alert:
+            normalizeAlertResponse(alertJson)
+        });
+      }
+      catch (err) {
+        console.error(
+          "DARKTRACE-X predictive intelligence error:",
+          err
+        );
+
+        setThreatIntelligence(null);
+        setIntelligenceError(
+          err.message ||
+          "Unable to load predictive intelligence."
+        );
+      }
+      finally {
+        setIntelligenceLoading(false);
+      }
+    }
+
+    loadThreatIntelligence();
+
+  }, [
+    selectedNode,
+    actorIntelligence,
+    operationalData,
+    timelineEvents
+  ]);
+
+
+  /* =====================================================
+     GRAPH PHYSICS
+     ===================================================== */
+
+  useEffect(() => {
+
+    if (
+      !graphRef.current ||
+      forceGraphData.nodes.length === 0
+    ) {
+
+      return;
+
+    }
+
+
+    const graphInstance =
+      graphRef.current;
+
+
+    graphInstance.d3Force(
+      "charge",
+      forceManyBody()
+        .strength(-420)
+        .distanceMax(700)
+    );
+
+
+    graphInstance.d3Force(
+      "collide",
+      forceCollide()
+        .radius(
+          node => {
+
+            if (
+              node.type ===
+              "actor"
+            ) {
+
+              return 60;
+
+            }
+
+
+            if (
+              node.type ===
+              "relationship_assessment"
+            ) {
+
+              return 70;
+
+            }
+
+
+            return 45;
+
+          }
+        )
+        .strength(1)
+    );
+
+
+    graphInstance.d3Force(
+      "link",
+      forceLink()
+        .id(
+          node =>
+            node.id
+        )
+        .distance(
+          link => {
+
+            if (
+              link.relationship ===
+              "SUPPORTED_BY"
+            ) {
+
+              return 150;
+
+            }
+
+
+            if (
+              link.relationship ===
+              "MULTI_ACTOR_RELATION"
+            ) {
+
+              return 230;
+
+            }
+
+
+            return 135;
+
+          }
+        )
+        .strength(0.4)
+    );
+
+
+    graphInstance.d3Force(
+      "center",
+      forceCenter(
+        graphSize.width / 2,
+        graphSize.height / 2
+      )
+    );
+
+
+    graphInstance.d3Force(
+      "x",
+      forceX(
+        graphSize.width / 2
+      ).strength(0.02)
+    );
+
+
+    graphInstance.d3Force(
+      "y",
+      forceY(
+        graphSize.height / 2
+      ).strength(0.02)
+    );
+
+
+    graphInstance.d3ReheatSimulation();
+
+  }, [
+    forceGraphData,
+    graphSize
+  ]);
+
+
+  /* =====================================================
+     NODE COLOR
+     ===================================================== */
+
+  function getNodeColor(node) {
+
+    if (
+      node.type === "actor"
+    ) {
+
+      return "#4ea1ff";
+
+    }
+
+
+    if (
+      node.type === "evidence"
+    ) {
+
+      return "#54d99a";
+
+    }
+
+
+    if (
+      node.type ===
+      "relationship_assessment"
+    ) {
+
+      return "#a794e8";
+
+    }
+
+
+    return "#8790a8";
+
+  }
+
+
+  /* =====================================================
+     NODE SIZE
+     ===================================================== */
+
+  function getNodeSize(node) {
+
+    if (
+      node.type === "actor"
+    ) {
+
+      return 13;
+
+    }
+
+
+    if (
+      node.type ===
+      "relationship_assessment"
+    ) {
+
+      return 16;
+
+    }
+
+
+    return 8;
+
+  }
+
+
+  /* =====================================================
+     TOOLTIP
+     ===================================================== */
+
+  function getNodeLabel(node) {
+
+    if (
+      node.type === "actor"
+    ) {
+
+      return (
+        `ACTOR: ${
+          node.properties?.id ||
+          node.id
+        }`
+      );
+
+    }
+
+
+    if (
+      node.type === "evidence"
+    ) {
+
+      return (
+        `EVIDENCE: ${
+          node.properties
+            ?.signal_type ||
+          ""
+        } | ${
+          node.properties
+            ?.entity_key ||
+          ""
+        }`
+      );
+
+    }
+
+
+    if (
+      node.type ===
+      "relationship_assessment"
+    ) {
+
+      return (
+        `ASSESSMENT: ${
+          (
+            Number(
+              node.properties
+                ?.confidence ||
+              0
+            ) * 100
+          ).toFixed(0)
+        }%`
+      );
+
+    }
+
+
+    return node.type;
+
+  }
+
+
+  /* =====================================================
+     CUSTOM NODE DRAWING
+     ===================================================== */
+
+  function drawNode(
+    node,
+    ctx,
+    globalScale
+  ) {
+
+    const size =
+      getNodeSize(node);
+
+
+    const color =
+      getNodeColor(node);
+
+
+    const isSelected =
+      selectedNode?.id ===
+      node.id;
+
+
+    ctx.beginPath();
+
+    ctx.arc(
+      node.x,
+      node.y,
+      size,
+      0,
+      2 * Math.PI
+    );
+
+
+    ctx.fillStyle =
+      color;
+
+
+    ctx.shadowColor =
+      color;
+
+
+    ctx.shadowBlur =
+      isSelected
+        ? 25
+        : 12;
+
+
+    ctx.fill();
+
+
+    ctx.shadowBlur = 0;
+
+
+    if (isSelected) {
+
+      ctx.beginPath();
+
+      ctx.arc(
+        node.x,
+        node.y,
+        size + 7,
+        0,
+        2 * Math.PI
+      );
+
+
+      ctx.strokeStyle =
+        "#ffffff";
+
+
+      ctx.lineWidth =
+        1.5;
+
+
+      ctx.stroke();
+
+    }
+
+
+    const showLabel =
+      node.type === "actor" ||
+      node.type ===
+        "relationship_assessment" ||
+      isSelected;
+
+
+    if (!showLabel) {
+      return;
+    }
+
+
+    let label = "";
+
+
+    if (
+      node.type === "actor"
+    ) {
+
+      label =
+        node.properties?.id ||
+        node.id ||
+        "ACTOR";
+
+    }
+
+    else if (
+      node.type ===
+      "relationship_assessment"
+    ) {
+
+      label =
+        "ASSESSMENT";
+
+    }
+
+    else {
+
+      label =
+        node.properties
+          ?.signal_type ||
+        "EVIDENCE";
+
+    }
+
+
+    const fontSize =
+      Math.max(
+        9,
+        12 / globalScale
+      );
+
+
+    ctx.font =
+      `600 ${fontSize}px Arial`;
+
+
+    ctx.textAlign =
+      "center";
+
+
+    ctx.textBaseline =
+      "middle";
+
+
+    ctx.fillStyle =
+      "#e8ecf5";
+
+
+    if (
+      node.type === "actor"
+    ) {
+
+      ctx.fillText(
+        label,
+        node.x,
+        node.y - size - 10
+      );
+
+    }
+
+    else if (
+      node.type ===
+      "relationship_assessment"
+    ) {
+
+      ctx.font =
+        `700 ${fontSize}px Arial`;
+
+
+      ctx.fillText(
+        "ASSESSMENT",
+        node.x,
+        node.y - size - 15
+      );
+
+
+      ctx.font =
+        `600 ${Math.max(
+          9,
+          11 / globalScale
+        )}px Arial`;
+
+
+      ctx.fillStyle =
+        "#a794e8";
+
+
+      ctx.fillText(
+        `${
+          (
+            Number(
+              node.properties
+                ?.confidence ||
+              0
+            ) * 100
+          ).toFixed(0)
+        }% CONFIDENCE`,
+        node.x,
+        node.y + size + 13
+      );
+
+    }
+
+    else if (
+      isSelected
+    ) {
+
+      ctx.fillStyle =
+        "#54d99a";
+
+
+      ctx.fillText(
+        label,
+        node.x,
+        node.y - size - 10
+      );
+
+    }
+
+  }
+
+
+  /* =====================================================
+     NODE CLICK
+     ===================================================== */
+
+  function handleNodeClick(node) {
+
+    setSelectedNode(node);
+
+
+    if (
+      graphRef.current &&
+      node.x !== undefined &&
+      node.y !== undefined
+    ) {
+
+      graphRef.current.centerAt(
+        node.x,
+        node.y,
+        600
+      );
+
+
+      graphRef.current.zoom(
+        node.type === "actor"
+          ? 2.2
+          : 3,
+        600
+      );
+
+    }
+
+  }
+
+
+  /* =====================================================
+     ENGINE STOP
+     ===================================================== */
+
+  function handleEngineStop() {
+
+    if (
+      graphRef.current
+    ) {
+
+      graphRef.current.zoomToFit(
+        800,
+        65
+      );
+
+    }
+
+  }
+
+
+  /* =====================================================
+     CLOSE INSPECTOR
+     ===================================================== */
+
+  function closeInspector() {
+
+    setSelectedNode(null);
+
+  }
+
+
+  /* =====================================================
+     TIMELINE STATE PROGRESS
+     ===================================================== */
+
+  const currentStateIndex =
+    getStateIndex(
+      operationalData?.currentState
+    );
+
+
+  /* =====================================================
+     RENDER
+     ===================================================== */
+
+  return (
+
+    <div className="darktracex">
+
+      {/* =================================================
+          HEADER
+          ================================================= */}
+
+      <header className="topbar">
+
+        <div className="brand">
+
+          <h1>
+            DARKTRACE-X
+          </h1>
+
+          <p>
+            Evidence-Driven Dark-Web Threat Intelligence Platform
+          </p>
+
+        </div>
+
+        <div className="system-status">
+
+          <span className="status-dot"></span>
+
+          SYSTEM{" "}
+
+          {loading
+            ? "CONNECTING"
+            : error
+              ? "OFFLINE"
+              : "ONLINE"}
+
+        </div>
+
+      </header>
+
+
+      <div className="workspace">
+
+        {/* =================================================
+            SIDEBAR
+            ================================================= */}
+
+        <aside className="sidebar">
+
+          <div className="section-title">
+            INVESTIGATION
+          </div>
+
+          <button className="nav-item active">
+            ◉ Overview
+          </button>
+
+          <button className="nav-item">
+            ◉ Actors
+          </button>
+
+          <button className="nav-item">
+            ◉ Evidence
+          </button>
+
+          <button className="nav-item">
+            ◉ Campaigns
+          </button>
+
+          <button className="nav-item">
+            ◉ Timeline
+          </button>
+
+          <button className="nav-item">
+            ◉ Predictions
+          </button>
+
+        </aside>
+
+
+        {/* =================================================
+            MAIN
+            ================================================= */}
+
+        <main className="main-content">
+
+          {/* =================================================
+              HERO
+              ================================================= */}
+
+          <section className="hero">
+
+            <div>
+
+              <span className="eyebrow">
+                THREAT INTELLIGENCE WORKBENCH
+              </span>
+
+              <h2>
+                See the operation unfold.
+              </h2>
+
+              <p>
+                Observe → Extract → Correlate →
+                Reconstruct → Predict
+              </p>
+
+            </div>
+
+            <div className="investigation-badge">
+              SYNTHETIC INVESTIGATION
+            </div>
+
+          </section>
+
+
+          {error && (
+
+            <div className="error-banner">
+              ⚠ {error}
+            </div>
+
+          )}
+
+
+          {/* =================================================
+              STATISTICS
+              ================================================= */}
+
+          <section className="stats">
+
+            <div className="stat-card">
+
+              <span>
+                ACTORS
+              </span>
+
+              <strong>
+
+                {loading
+                  ? "—"
+                  : statistics.actor_nodes}
+
+              </strong>
+
+            </div>
+
+
+            <div className="stat-card">
+
+              <span>
+                EVIDENCE
+              </span>
+
+              <strong>
+
+                {loading
+                  ? "—"
+                  : statistics.evidence_nodes}
+
+              </strong>
+
+            </div>
+
+
+            <div className="stat-card">
+
+              <span>
+                RELATIONSHIPS
+              </span>
+
+              <strong>
+
+                {loading
+                  ? "—"
+                  : statistics.relationship_count}
+
+              </strong>
+
+            </div>
+
+
+            <div className="stat-card">
+
+              <span>
+                ASSESSMENTS
+              </span>
+
+              <strong>
+
+                {loading
+                  ? "—"
+                  : statistics.assessment_nodes}
+
+              </strong>
+
+            </div>
+
+          </section>
+
+
+          {/* =================================================
+              INTELLIGENCE GRAPH
+              ================================================= */}
+
+          <section className="graph-panel">
+
+            <div className="panel-header">
+
+              <div>
+
+                <h3>
+                  Intelligence Graph
+                </h3>
+
+                <p>
+                  Interactive Neo4j actor and evidence network
+                </p>
+
+              </div>
+
+              <span className="live-label">
+
+                {loading
+                  ? "CONNECTING"
+                  : error
+                    ? "OFFLINE"
+                    : "LIVE GRAPH"}
+
+              </span>
+
+            </div>
+
+
+            <div
+              className="interactive-graph"
+              ref={
+                graphContainerRef
+              }
+            >
+
+              {loading && (
+
+                <div className="graph-message">
+                  Connecting to intelligence graph...
+                </div>
+
+              )}
+
+
+              {!loading &&
+                !error &&
+                forceGraphData.nodes
+                  .length > 0 && (
+
+                  <ForceGraph2D
+
+                    ref={
+                      graphRef
+                    }
+
+                    graphData={
+                      forceGraphData
+                    }
+
+                    width={
+                      graphSize.width
+                    }
+
+                    height={
+                      graphSize.height
+                    }
+
+                    backgroundColor="#090c13"
+
+                    nodeLabel={
+                      getNodeLabel
+                    }
+
+                    nodeColor={
+                      getNodeColor
+                    }
+
+                    nodeVal={
+                      getNodeSize
+                    }
+
+                    nodeCanvasObject={
+                      drawNode
+                    }
+
+                    nodeCanvasObjectMode={
+                      () => "replace"
+                    }
+
+                    linkColor={
+                      link => {
+
+                        if (
+                          link.relationship ===
+                          "SUPPORTED_BY"
+                        ) {
+
+                          return "#6d5ca8";
+
+                        }
+
+                        if (
+                          link.relationship ===
+                          "MULTI_ACTOR_RELATION"
+                        ) {
+
+                          return "#4ea1ff";
+
+                        }
+
+                        return "#3b455a";
+
+                      }
+                    }
+
+                    linkWidth={
+                      link => {
+
+                        if (
+                          link.relationship ===
+                          "SUPPORTED_BY"
+                        ) {
+
+                          return 2;
+
+                        }
+
+                        if (
+                          link.relationship ===
+                          "MULTI_ACTOR_RELATION"
+                        ) {
+
+                          return 2.5;
+
+                        }
+
+                        return 1;
+
+                      }
+                    }
+
+                    linkDirectionalArrowLength={
+                      5
+                    }
+
+                    linkDirectionalArrowRelPos={
+                      1
+                    }
+
+                    linkLabel={
+                      link =>
+                        link.relationship
+                    }
+
+                    onNodeClick={
+                      handleNodeClick
+                    }
+
+                    onEngineStop={
+                      handleEngineStop
+                    }
+
+                    cooldownTicks={
+                      180
+                    }
+
+                    warmupTicks={
+                      100
+                    }
+
+                    d3VelocityDecay={
+                      0.32
+                    }
+
+                    d3AlphaDecay={
+                      0.025
+                    }
+
+                    enableNodeDrag={
+                      true
+                    }
+
+                    enableZoomInteraction={
+                      true
+                    }
+
+                    enablePanInteraction={
+                      true
+                    }
+
+                  />
+
+                )}
+
+            </div>
+
+
+            <div className="graph-legend">
+
+              <div>
+                <span className="legend-dot actor"></span>
+                ACTOR
+              </div>
+
+              <div>
+                <span className="legend-dot evidence"></span>
+                EVIDENCE
+              </div>
+
+              <div>
+                <span className="legend-dot assessment"></span>
+                ASSESSMENT
+              </div>
+
+              <div>
+                Drag • Zoom • Click
+              </div>
+
+            </div>
+
+          </section>
+
+
+          {/* =================================================
+              ACTOR INTELLIGENCE PROFILE
+              ================================================= */}
+
+          {actorIntelligence && (
+
+            <section className="actor-investigation">
+
+              <div className="actor-investigation-header">
+
+                <div>
+
+                  <span className="eyebrow">
+                    ACTOR INTELLIGENCE PROFILE
+                  </span>
+
+                  <h2>
+                    {
+                      actorIntelligence
+                        .actorId
+                    }
+                  </h2>
+
+                  <p>
+                    SYNTHETIC THREAT ACTOR
+                    {" • "}
+                    {
+                      actorIntelligence
+                        .platform
+                    }
+                  </p>
+
+                </div>
+
+                <button
+                  className="close-button"
+                  onClick={
+                    closeInspector
+                  }
+                >
+                  ×
+                </button>
+
+              </div>
+
+
+              <div className="actor-summary">
+
+                <div className="actor-summary-card">
+
+                  <span>
+                    EVIDENCE
+                  </span>
+
+                  <strong>
+                    {
+                      actorIntelligence
+                        .evidenceCount
+                    }
+                  </strong>
+
+                </div>
+
+
+                <div className="actor-summary-card">
+
+                  <span>
+                    CONNECTED ACTORS
+                  </span>
+
+                  <strong>
+                    {
+                      actorIntelligence
+                        .actorConnectionCount
+                    }
+                  </strong>
+
+                </div>
+
+
+                <div className="actor-summary-card">
+
+                  <span>
+                    SIGNAL TYPES
+                  </span>
+
+                  <strong>
+                    {
+                      actorIntelligence
+                        .signalTypes
+                        .length
+                    }
+                  </strong>
+
+                </div>
+
+
+                <div className="actor-summary-card">
+
+                  <span>
+                    RELATIONSHIP
+                  </span>
+
+                  <strong>
+
+                    {
+                      actorIntelligence
+                        .relationshipConfidence
+                        > 0
+                        ? `${(
+                            actorIntelligence
+                              .relationshipConfidence
+                              * 100
+                          ).toFixed(0)}%`
+                        : "—"
+                    }
+
+                  </strong>
+
+                </div>
+
+              </div>
+
+
+              <div className="actor-profile-grid">
+
+                <div className="actor-profile-card">
+
+                  <span>
+                    ALIASES
+                  </span>
+
+                  {actorIntelligence
+                    .aliases.length > 0 ? (
+
+                    actorIntelligence
+                      .aliases
+                      .map(
+                        alias => (
+
+                          <div
+                            className="intel-value"
+                            key={
+                              alias
+                            }
+                          >
+                            {alias}
+                          </div>
+
+                        )
+                      )
+
+                  ) : (
+
+                    <div className="intel-empty">
+                      No alias evidence connected
+                    </div>
+
+                  )}
+
+                </div>
+
+
+                <div className="actor-profile-card">
+
+                  <span>
+                    INFRASTRUCTURE
+                  </span>
+
+                  {actorIntelligence
+                    .infrastructure
+                    .length > 0 ? (
+
+                    actorIntelligence
+                      .infrastructure
+                      .map(
+                        item => (
+
+                          <div
+                            className="intel-value"
+                            key={
+                              item
+                            }
+                          >
+                            {item}
+                          </div>
+
+                        )
+                      )
+
+                  ) : (
+
+                    <div className="intel-empty">
+                      No infrastructure evidence connected
+                    </div>
+
+                  )}
+
+                </div>
+
+
+                <div className="actor-profile-card">
+
+                  <span>
+                    CAMPAIGNS
+                  </span>
+
+                  {actorIntelligence
+                    .campaigns
+                    .length > 0 ? (
+
+                    actorIntelligence
+                      .campaigns
+                      .map(
+                        campaign => (
+
+                          <div
+                            className="intel-value"
+                            key={
+                              campaign
+                            }
+                          >
+                            {campaign}
+                          </div>
+
+                        )
+                      )
+
+                  ) : (
+
+                    <div className="intel-empty">
+                      No campaign evidence connected
+                    </div>
+
+                  )}
+
+                </div>
+
+
+                <div className="actor-profile-card">
+
+                  <span>
+                    WALLET / BLOCKCHAIN
+                  </span>
+
+                  {actorIntelligence
+                    .wallets.length > 0 ? (
+
+                    actorIntelligence
+                      .wallets
+                      .map(
+                        wallet => (
+
+                          <div
+                            className="intel-value"
+                            key={
+                              wallet
+                            }
+                          >
+                            {wallet}
+                          </div>
+
+                        )
+                      )
+
+                  ) : (
+
+                    <div className="intel-empty">
+                      No wallet evidence connected
+                    </div>
+
+                  )}
+
+                </div>
+
+              </div>
+
+
+              <div className="actor-profile-card behavior-card">
+
+                <span>
+                  BEHAVIORAL SIGNALS
+                </span>
+
+
+                {actorIntelligence
+                  .behaviors
+                  .length > 0 ? (
+
+                  <div className="signal-list">
+
+                    {actorIntelligence
+                      .behaviors
+                      .map(
+                        behavior => (
+
+                          <div
+                            className="signal-chip"
+                            key={
+                              behavior
+                            }
+                          >
+                            {behavior}
+                          </div>
+
+                        )
+                      )}
+
+                  </div>
+
+                ) : (
+
+                  <div className="intel-empty">
+                    Behavioral evidence will appear as additional signals are correlated.
+                  </div>
+
+                )}
+
+              </div>
+
+
+              <div className="actor-evidence-section">
+
+                <div className="actor-section-title">
+
+                  <div>
+
+                    <span>
+                      SUPPORTING SIGNALS
+                    </span>
+
+                    <h3>
+                      Evidence supporting this actor profile
+                    </h3>
+
+                  </div>
+
+                </div>
+
+
+                <div className="supporting-signals">
+
+                  {actorIntelligence
+                    .connectedEvidence
+                    .map(
+                      evidence => (
+
+                        <div
+                          className="supporting-signal"
+                          key={
+                            evidence.id
+                          }
+                        >
+
+                          <div className="signal-check">
+                            ✓
+                          </div>
+
+
+                          <div>
+
+                            <strong>
+                              {
+                                evidence
+                                  .properties
+                                  ?.signal_type
+                              }
+                            </strong>
+
+
+                            <p>
+                              {
+                                evidence
+                                  .properties
+                                  ?.entity_key
+                              }
+                            </p>
+
+
+                            {evidence
+                              .properties
+                              ?.explanation && (
+
+                              <small>
+                                {
+                                  evidence
+                                    .properties
+                                    ?.explanation
+                                }
+                              </small>
+
+                            )}
+
+                          </div>
+
+
+                          <b>
+
+                            {(
+                              Number(
+                                evidence
+                                  .properties
+                                  ?.strength ||
+                                0
+                              ) * 100
+                            ).toFixed(0)}
+
+                            %
+
+                          </b>
+
+                        </div>
+
+                      )
+                    )}
+
+
+                  {actorIntelligence
+                    .connectedEvidence
+                    .length === 0 && (
+
+                    <div className="intel-empty">
+                      No directly connected evidence nodes.
+                    </div>
+
+                  )}
+
+                </div>
+
+              </div>
+
+
+              <div className="actor-evidence-section">
+
+                <div className="actor-section-title">
+
+                  <div>
+
+                    <span>
+                      MULTI-ACTOR RELATIONSHIPS
+                    </span>
+
+                    <h3>
+                      Connected intelligence entities
+                    </h3>
+
+                  </div>
+
+                </div>
+
+
+                <div className="connected-actors">
+
+                  {actorIntelligence
+                    .connectedActors
+                    .map(
+                      actor => (
+
+                        <button
+                          className="connected-actor"
+                          key={
+                            actor.id
+                          }
+
+                          onClick={() =>
+                            handleNodeClick(
+                              actor
+                            )
+                          }
+                        >
+
+                          <span className="actor-dot"></span>
+
+                          <strong>
+                            {
+                              actor
+                                .properties
+                                ?.id ||
+                              actor.id
+                            }
+                          </strong>
+
+                          <span>
+                            VIEW PROFILE →
+                          </span>
+
+                        </button>
+
+                      )
+                    )}
+
+
+                  {actorIntelligence
+                    .connectedActors
+                    .length === 0 && (
+
+                    <div className="intel-empty">
+                      No connected actor relationships currently available.
+                    </div>
+
+                  )}
+
+                </div>
+
+              </div>
+
+
+              <div className="actor-assessment-box">
+
+                <div>
+
+                  <span>
+                    RELATIONSHIP CONFIDENCE
+                  </span>
+
+                  <strong>
+
+                    {
+                      actorIntelligence
+                        .relationshipConfidence
+                        > 0
+
+                        ? `${(
+                            actorIntelligence
+                              .relationshipConfidence
+                              * 100
+                          ).toFixed(0)}%`
+
+                        : "NO ASSESSMENT"
+                    }
+
+                  </strong>
+
+                </div>
+
+
+                <div className="confidence-bar">
+
+                  <div
+                    style={{
+                      width: `${
+                        actorIntelligence
+                          .relationshipConfidence
+                          * 100
+                      }%`
+                    }}
+                  ></div>
+
+                </div>
+
+
+                <p>
+
+                  {actorIntelligence
+                    .relationshipTypes
+                    .length > 0
+
+                    ? `Relationship assessment: ${actorIntelligence.relationshipTypes.join(", ")}.`
+
+                    : "No relationship assessment is directly connected to this actor."}
+
+                  {" "}
+                  This is an intelligence assessment based on synthetic evidence and is not confirmed real-world attribution.
+
+                </p>
+
+              </div>
+
+
+              {/* =================================================
+                  OPERATIONAL REPLAY
+                  ================================================= */}
+
+              <section
+                style={{
+                  margin:
+                    "0 20px 20px",
+                  border:
+                    "1px solid #30394f",
+                  borderRadius:
+                    "12px",
+                  background:
+                    "linear-gradient(145deg,#101522,#0b0f18)",
+                  overflow:
+                    "hidden"
+                }}
+              >
+
+                <div
+                  style={{
+                    padding:
+                      "20px",
+                    borderBottom:
+                      "1px solid #202638",
+                    display:
+                      "flex",
+                    justifyContent:
+                      "space-between",
+                    alignItems:
+                      "flex-start",
+                    gap:
+                      "20px"
+                  }}
+                >
+
+                  <div>
+
+                    <span
+                      className="eyebrow"
+                    >
+                      OPERATIONAL REPLAY
+                    </span>
+
+                    <h2
+                      style={{
+                        margin:
+                          "7px 0 4px",
+                        fontSize:
+                          "20px"
+                      }}
+                    >
+                      See the operation unfold.
+                    </h2>
+
+                    <p
+                      style={{
+                        margin: 0,
+                        color:
+                          "#68738a",
+                        fontSize:
+                          "10px"
+                      }}
+                    >
+                      Actor-specific operational state reconstruction and activity timeline
+                    </p>
+
+                  </div>
+
+                  <span
+                    className="live-label"
+                  >
+                    {operationalLoading
+                      ? "LOADING"
+                      : operationalError
+                        ? "ERROR"
+                        : "LIVE INTELLIGENCE"}
+                  </span>
+
+                </div>
+
+
+                {operationalLoading && (
+
+                  <div
+                    style={{
+                      padding:
+                        "35px",
+                      textAlign:
+                        "center",
+                      color:
+                        "#748098",
+                      fontSize:
+                        "11px"
+                    }}
+                  >
+                    Reconstructing operational activity...
+                  </div>
+
+                )}
+
+
+                {!operationalLoading &&
+                  operationalError && (
+
+                  <div
+                    style={{
+                      margin:
+                        "16px",
+                      padding:
+                        "14px",
+                      border:
+                        "1px solid #55353d",
+                      borderRadius:
+                        "7px",
+                      background:
+                        "#1b1115",
+                      color:
+                        "#d8909b",
+                      fontSize:
+                        "10px"
+                    }}
+                  >
+                    ⚠ {operationalError}
+                  </div>
+
+                )}
+
+
+                {!operationalLoading &&
+                  !operationalError && (
+
+                  <>
+
+                    {/* CURRENT STATE */}
+
+                    <div
+                      style={{
+                        padding:
+                          "20px",
+                        borderBottom:
+                          "1px solid #202638"
+                      }}
+                    >
+
+                      <div
+                        style={{
+                          display:
+                            "flex",
+                          justifyContent:
+                            "space-between",
+                          alignItems:
+                            "flex-end",
+                          marginBottom:
+                            "13px",
+                          gap:
+                            "15px"
+                        }}
+                      >
+
+                        <div>
+
+                          <span
+                            style={{
+                              display:
+                                "block",
+                              color:
+                                "#66718a",
+                              fontSize:
+                                "8px",
+                              letterSpacing:
+                                "1.5px"
+                            }}
+                          >
+                            CURRENT OPERATIONAL STATE
+                          </span>
+
+                          <strong
+                            style={{
+                              display:
+                                "block",
+                              marginTop:
+                                "7px",
+                              color:
+                                "#e8ecf5",
+                              fontSize:
+                                "22px"
+                            }}
+                          >
+                            {
+                              resolveCurrentOperationalState(
+                                operationalData,
+                                timelineEvents,
+                                selectedNode
+                              )
+                            }
+                          </strong>
+
+                        </div>
+
+
+                        <div
+                          style={{
+                            textAlign:
+                              "right"
+                          }}
+                        >
+
+                          <span
+                            style={{
+                              display:
+                                "block",
+                              color:
+                                "#66718a",
+                              fontSize:
+                                "8px",
+                              letterSpacing:
+                                "1.3px"
+                            }}
+                          >
+                            STATE CONFIDENCE
+                          </span>
+
+                          <strong
+                            style={{
+                              display:
+                                "block",
+                              marginTop:
+                                "6px",
+                              color:
+                                "#54d99a",
+                              fontSize:
+                                "20px"
+                            }}
+                          >
+                            {(
+                              (
+                                operationalData
+                                  ?.stateConfidence ||
+                                0
+                              ) * 100
+                            ).toFixed(0)}
+                            %
+                          </strong>
+
+                        </div>
+
+                      </div>
+
+
+                      <div
+                        style={{
+                          height:
+                            "6px",
+                          borderRadius:
+                            "5px",
+                          background:
+                            "#202638",
+                          overflow:
+                            "hidden"
+                        }}
+                      >
+
+                        <div
+                          style={{
+                            width: `${
+                              (
+                                operationalData
+                                  ?.stateConfidence ||
+                                0
+                              ) * 100
+                            }%`,
+                            height:
+                              "100%",
+                            background:
+                              "#54d99a",
+                            boxShadow:
+                              "0 0 12px #54d99a"
+                          }}
+                        />
+
+                      </div>
+
+
+                      {operationalData
+                        ?.assessment && (
+
+                        <p
+                          style={{
+                            margin:
+                              "12px 0 0",
+                            color:
+                              "#737e95",
+                            fontSize:
+                              "9px",
+                            lineHeight:
+                              "1.6"
+                          }}
+                        >
+                          {
+                            operationalData
+                              .assessment
+                          }
+                        </p>
+
+                      )}
+
+                    </div>
+
+
+                    {/* STATE PIPELINE */}
+
+                    <div
+                      style={{
+                        padding:
+                          "20px",
+                        borderBottom:
+                          "1px solid #202638",
+                        overflowX:
+                          "auto"
+                      }}
+                    >
+
+                      <span
+                        style={{
+                          display:
+                            "block",
+                          marginBottom:
+                            "15px",
+                          color:
+                            "#66718a",
+                          fontSize:
+                            "8px",
+                          letterSpacing:
+                            "1.5px"
+                        }}
+                      >
+                        OPERATIONAL PROGRESSION
+                      </span>
+
+
+                      <div
+                        style={{
+                          display:
+                            "flex",
+                          alignItems:
+                            "center",
+                          minWidth:
+                            "760px"
+                        }}
+                      >
+
+                        {OPERATIONAL_STATES.map(
+                          (
+                            state,
+                            index
+                          ) => {
+
+                            const completed =
+                              currentStateIndex >=
+                              index &&
+                              currentStateIndex >=
+                              0;
+
+                            const current =
+                              currentStateIndex ===
+                              index;
+
+
+                            return (
+
+                              <div
+                                key={
+                                  state
+                                }
+                                style={{
+                                  display:
+                                    "flex",
+                                  alignItems:
+                                    "center",
+                                  flex:
+                                    index <
+                                    OPERATIONAL_STATES.length -
+                                      1
+                                      ? 1
+                                      : "0 0 auto"
+                                }}
+                              >
+
+                                <div
+                                  style={{
+                                    textAlign:
+                                      "center",
+                                    width:
+                                      "85px"
+                                  }}
+                                >
+
+                                  <div
+                                    style={{
+                                      width:
+                                        current
+                                          ? "18px"
+                                          : "12px",
+                                      height:
+                                        current
+                                          ? "18px"
+                                          : "12px",
+                                      margin:
+                                        "0 auto 8px",
+                                      borderRadius:
+                                        "50%",
+                                      background:
+                                        completed
+                                          ? "#54d99a"
+                                          : "#30394f",
+                                      border:
+                                        current
+                                          ? "2px solid #e8ecf5"
+                                          : "1px solid #47536c",
+                                      boxShadow:
+                                        current
+                                          ? "0 0 15px #54d99a"
+                                          : "none"
+                                    }}
+                                  />
+
+                                  <span
+                                    style={{
+                                      display:
+                                        "block",
+                                      color:
+                                        current
+                                          ? "#e8ecf5"
+                                          : completed
+                                            ? "#86bca8"
+                                            : "#5d687e",
+                                      fontSize:
+                                        "7px",
+                                      lineHeight:
+                                        "1.4"
+                                    }}
+                                  >
+                                    {state}
+                                  </span>
+
+                                </div>
+
+
+                                {index <
+                                  OPERATIONAL_STATES.length -
+                                    1 && (
+
+                                  <div
+                                    style={{
+                                      flex:
+                                        1,
+                                      height:
+                                        "2px",
+                                      background:
+                                        currentStateIndex >
+                                        index
+                                          ? "#54d99a"
+                                          : "#283043",
+                                      margin:
+                                        "0 5px 27px"
+                                    }}
+                                  />
+
+                                )}
+
+                              </div>
+
+                            );
+
+                          }
+                        )}
+
+                      </div>
+
+                    </div>
+
+
+                    {/* ACTIVITY TIMELINE */}
+
+                    <div
+                      style={{
+                        padding:
+                          "20px"
+                      }}
+                    >
+
+                      <div
+                        style={{
+                          display:
+                            "flex",
+                          justifyContent:
+                            "space-between",
+                          alignItems:
+                            "center",
+                          marginBottom:
+                            "15px"
+                        }}
+                      >
+
+                        <div>
+
+                          <span
+                            style={{
+                              display:
+                                "block",
+                              color:
+                                "#66718a",
+                              fontSize:
+                                "8px",
+                              letterSpacing:
+                                "1.5px"
+                            }}
+                          >
+                            ACTIVITY REPLAY
+                          </span>
+
+                          <h3
+                            style={{
+                              margin:
+                                "5px 0 0",
+                              color:
+                                "#dce2ef",
+                              fontSize:
+                                "14px"
+                            }}
+                          >
+                            Reconstructed operational timeline
+                          </h3>
+
+                        </div>
+
+
+                        <span
+                          style={{
+                            padding:
+                              "5px 8px",
+                            border:
+                              "1px solid #2a3448",
+                            borderRadius:
+                              "5px",
+                            color:
+                              "#758198",
+                            fontSize:
+                              "8px"
+                          }}
+                        >
+                          {
+                            timelineEvents.length
+                          } EVENTS
+                        </span>
+
+                      </div>
+
+
+                      {timelineEvents.length ===
+                        0 && (
+
+                        <div
+                          style={{
+                            padding:
+                              "25px",
+                            textAlign:
+                              "center",
+                            border:
+                              "1px dashed #283043",
+                            borderRadius:
+                              "7px",
+                            color:
+                              "#59647a",
+                            fontSize:
+                              "10px"
+                          }}
+                        >
+                          No reconstructed activity events are currently available for this actor.
+                        </div>
+
+                      )}
+
+
+                      {timelineEvents.length >
+                        0 && (
+
+                        <div
+                          style={{
+                            position:
+                              "relative"
+                          }}
+                        >
+
+                          <div
+                            style={{
+                              position:
+                                "absolute",
+                              left:
+                                "10px",
+                              top:
+                                "8px",
+                              bottom:
+                                "8px",
+                              width:
+                                "2px",
+                              background:
+                                "#273044"
+                            }}
+                          />
+
+
+                          <div
+                            style={{
+                              display:
+                                "grid",
+                              gap:
+                                "8px"
+                            }}
+                          >
+
+                            {timelineEvents.map(
+                              (
+                                event,
+                                index
+                              ) => (
+
+                                <div
+                                  key={
+                                    event.eventId
+                                  }
+                                  style={{
+                                    position:
+                                      "relative",
+                                    paddingLeft:
+                                      "32px"
+                                  }}
+                                >
+
+                                  <div
+                                    style={{
+                                      position:
+                                        "absolute",
+                                      left:
+                                        "4px",
+                                      top:
+                                        "17px",
+                                      width:
+                                        "13px",
+                                      height:
+                                        "13px",
+                                      borderRadius:
+                                        "50%",
+                                      background:
+                                        "#4ea1ff",
+                                      border:
+                                        "2px solid #0b0f18",
+                                      boxShadow:
+                                        "0 0 10px #4ea1ff",
+                                      zIndex:
+                                        2
+                                    }}
+                                  />
+
+
+                                  <div
+                                    style={{
+                                      padding:
+                                        "13px",
+                                      border:
+                                        "1px solid #202638",
+                                      borderRadius:
+                                        "7px",
+                                      background:
+                                        "#0a0e16"
+                                    }}
+                                  >
+
+                                    <div
+                                      style={{
+                                        display:
+                                          "flex",
+                                        justifyContent:
+                                          "space-between",
+                                        gap:
+                                          "15px",
+                                        alignItems:
+                                          "flex-start"
+                                      }}
+                                    >
+
+                                      <div>
+
+                                        <span
+                                          style={{
+                                            display:
+                                              "block",
+                                            color:
+                                              "#59647a",
+                                            fontSize:
+                                              "8px",
+                                            marginBottom:
+                                              "5px"
+                                          }}
+                                        >
+                                          {formatTimestamp(
+                                            event.timestamp
+                                          )}
+                                        </span>
+
+
+                                        <strong
+                                          style={{
+                                            display:
+                                              "block",
+                                            color:
+                                              "#dce2ef",
+                                            fontSize:
+                                              "10px",
+                                            letterSpacing:
+                                              "0.4px"
+                                          }}
+                                        >
+                                          {
+                                            event.eventType
+                                          }
+                                        </strong>
+
+                                      </div>
+
+
+                                      <span
+                                        style={{
+                                          color:
+                                            "#54d99a",
+                                          fontSize:
+                                            "9px",
+                                          fontWeight:
+                                            "700"
+                                        }}
+                                      >
+                                        {(
+                                          event.confidence *
+                                          100
+                                        ).toFixed(0)}
+                                        %
+                                      </span>
+
+                                    </div>
+
+
+                                    {event.state && (
+
+                                      <div
+                                        style={{
+                                          display:
+                                            "inline-block",
+                                          marginTop:
+                                            "8px",
+                                          padding:
+                                            "4px 7px",
+                                          border:
+                                            "1px solid #30394f",
+                                          borderRadius:
+                                            "4px",
+                                          color:
+                                            "#a794e8",
+                                          fontSize:
+                                            "8px"
+                                        }}
+                                      >
+                                        STATE:{" "}
+                                        {
+                                          event.state
+                                        }
+                                      </div>
+
+                                    )}
+
+
+                                    <p
+                                      style={{
+                                        margin:
+                                          "9px 0 0",
+                                        color:
+                                          "#7a859b",
+                                        fontSize:
+                                          "9px",
+                                        lineHeight:
+                                          "1.6"
+                                      }}
+                                    >
+                                      {
+                                        event.description
+                                      }
+                                    </p>
+
+
+                                    {(event.signalType ||
+                                      event.source) && (
+
+                                      <div
+                                        style={{
+                                          display:
+                                            "flex",
+                                          flexWrap:
+                                            "wrap",
+                                          gap:
+                                            "6px",
+                                          marginTop:
+                                            "9px"
+                                        }}
+                                      >
+
+                                        {event.signalType && (
+
+                                          <span
+                                            style={{
+                                              padding:
+                                                "4px 7px",
+                                              border:
+                                                "1px solid #29443b",
+                                              borderRadius:
+                                                "4px",
+                                              color:
+                                                "#75b99f",
+                                              fontSize:
+                                                "8px"
+                                            }}
+                                          >
+                                            SIGNAL:{" "}
+                                            {
+                                              event.signalType
+                                            }
+                                          </span>
+
+                                        )}
+
+
+                                        {event.source && (
+
+                                          <span
+                                            style={{
+                                              padding:
+                                                "4px 7px",
+                                              border:
+                                                "1px solid #30394f",
+                                              borderRadius:
+                                                "4px",
+                                              color:
+                                                "#657189",
+                                              fontSize:
+                                                "8px"
+                                            }}
+                                          >
+                                            SOURCE:{" "}
+                                            {
+                                              event.source
+                                            }
+                                          </span>
+
+                                        )}
+
+                                      </div>
+
+                                    )}
+
+
+                                    {event.evidence && (
+
+                                      <div
+                                        style={{
+                                          marginTop:
+                                            "9px",
+                                          padding:
+                                            "8px",
+                                          borderLeft:
+                                            "2px solid #a794e8",
+                                          color:
+                                            "#656f87",
+                                          fontSize:
+                                            "8px",
+                                          lineHeight:
+                                            "1.5"
+                                        }}
+                                      >
+                                        EVIDENCE:{" "}
+                                        {
+                                          typeof event.evidence ===
+                                          "string"
+                                            ? event.evidence
+                                            : JSON.stringify(
+                                                event.evidence
+                                              )
+                                        }
+                                      </div>
+
+                                    )}
+
+                                  </div>
+
+                                </div>
+
+                              )
+                            )}
+
+                          </div>
+
+                        </div>
+
+                      )}
+
+                    </div>
+
+
+                  </>
+
+                )}
+
+              </section>
+
+            </section>
+
+          )}
+
+
+          {/* =================================================
+              THREAT INTELLIGENCE COMMAND CENTER
+              ================================================= */}
+
+          {actorIntelligence && (
+            <section
+              style={{
+                margin: "0 20px 20px",
+                border: "1px solid #30394f",
+                borderRadius: "12px",
+                background: "linear-gradient(145deg,#111725,#090d15)",
+                overflow: "hidden"
+              }}
+            >
+              <div
+                style={{
+                  padding: "20px",
+                  borderBottom: "1px solid #202638",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "flex-start",
+                  gap: "15px"
+                }}
+              >
+                <div>
+                  <span className="eyebrow">THREAT INTELLIGENCE COMMAND CENTER</span>
+                  <h2 style={{ margin: "7px 0 4px", fontSize: "20px" }}>
+                    From change to warning.
+                  </h2>
+                  <p style={{ margin: 0, color: "#68738a", fontSize: "10px" }}>
+                    What Changed → Prediction → Alert → Defensive Response
+                  </p>
+                </div>
+                <span className="live-label">
+                  {intelligenceLoading ? "ANALYZING" : "LIVE INTELLIGENCE"}
+                </span>
+              </div>
+
+              {intelligenceLoading && (
+                <div style={{ padding: "35px", textAlign: "center", color: "#748098", fontSize: "11px" }}>
+                  Correlating changes, forecasting next activity, and generating intelligence alert...
+                </div>
+              )}
+
+              {!intelligenceLoading && intelligenceError && (
+                <div style={{ margin: "16px", padding: "14px", border: "1px solid #55353d", borderRadius: "7px", background: "#1b1115", color: "#d8909b", fontSize: "10px" }}>
+                  ⚠ {intelligenceError}
+                </div>
+              )}
+
+              {!intelligenceLoading && !intelligenceError && threatIntelligence && (
+                <>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(3,minmax(0,1fr))",
+                      gap: "1px",
+                      background: "#202638"
+                    }}
+                  >
+                    <div style={{ padding: "18px", background: "#0d121c" }}>
+                      <span style={{ color: "#66718a", fontSize: "8px", letterSpacing: "1.4px" }}>RISK SCORE</span>
+                      <strong style={{ display: "block", marginTop: "7px", color: "#e8ecf5", fontSize: "25px" }}>
+                        {threatIntelligence.riskScore}/100
+                      </strong>
+                    </div>
+                    <div style={{ padding: "18px", background: "#0d121c" }}>
+                      <span style={{ color: "#66718a", fontSize: "8px", letterSpacing: "1.4px" }}>CHANGES DETECTED</span>
+                      <strong style={{ display: "block", marginTop: "7px", color: "#54d99a", fontSize: "25px" }}>
+                        {threatIntelligence.changeCount}
+                      </strong>
+                    </div>
+                    <div style={{ padding: "18px", background: "#0d121c" }}>
+                      <span style={{ color: "#66718a", fontSize: "8px", letterSpacing: "1.4px" }}>PREDICTION</span>
+                      <strong style={{ display: "block", marginTop: "7px", color: "#a794e8", fontSize: "25px" }}>
+                        {(threatIntelligence.prediction.probability * 100).toFixed(0)}%
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div style={{ padding: "20px", borderBottom: "1px solid #202638" }}>
+                    <span style={{ color: "#66718a", fontSize: "8px", letterSpacing: "1.5px" }}>WHAT CHANGED</span>
+                    <div style={{ display: "grid", gap: "7px", marginTop: "12px" }}>
+                      {threatIntelligence.changeSummary.slice(0, 8).map((item, index) => (
+                        <div key={`${item}-${index}`} style={{ display: "flex", gap: "8px", alignItems: "flex-start", color: "#b6bfd0", fontSize: "10px" }}>
+                          <span style={{ color: "#54d99a", fontWeight: "800" }}>+</span>
+                          <span>{item}</span>
+                        </div>
+                      ))}
+                      {threatIntelligence.changeSummary.length === 0 && (
+                        <div style={{ color: "#59647a", fontSize: "10px" }}>No significant changes detected.</div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ padding: "20px", borderBottom: "1px solid #202638" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "15px", alignItems: "flex-end" }}>
+                      <div>
+                        <span style={{ color: "#66718a", fontSize: "8px", letterSpacing: "1.5px" }}>PREDICTED NEXT ACTIVITY</span>
+                        <strong style={{ display: "block", marginTop: "7px", color: "#e8ecf5", fontSize: "20px" }}>
+                          {threatIntelligence.prediction.predictedState}
+                        </strong>
+                      </div>
+                      <strong style={{ color: "#a794e8", fontSize: "18px" }}>
+                        {(threatIntelligence.prediction.probability * 100).toFixed(0)}%
+                      </strong>
+                    </div>
+
+                    <div style={{ height: "7px", marginTop: "12px", borderRadius: "5px", background: "#202638", overflow: "hidden" }}>
+                      <div style={{ width: `${threatIntelligence.prediction.probability * 100}%`, height: "100%", background: "#a794e8", boxShadow: "0 0 12px #a794e8" }} />
+                    </div>
+
+                    {threatIntelligence.prediction.reasoning.length > 0 && (
+                      <div style={{ display: "grid", gap: "5px", marginTop: "12px" }}>
+                        {threatIntelligence.prediction.reasoning.slice(0, 5).map((item, index) => (
+                          <div key={`${item}-${index}`} style={{ color: "#737e95", fontSize: "9px", lineHeight: "1.5" }}>
+                            • {item}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ padding: "20px", borderBottom: "1px solid #202638" }}>
+                    <div style={{ padding: "15px", border: "1px solid #55353d", borderRadius: "8px", background: "#170f14" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "15px" }}>
+                        <div>
+                          <span style={{ color: "#8a6470", fontSize: "8px", letterSpacing: "1.5px" }}>INTELLIGENCE ALERT</span>
+                          <strong style={{ display: "block", marginTop: "6px", color: "#f0c6cd", fontSize: "16px" }}>
+                            🚨 {threatIntelligence.alert.title}
+                          </strong>
+                        </div>
+                        <span style={{ padding: "6px 9px", border: "1px solid #75414c", borderRadius: "5px", color: "#f0a8b5", fontSize: "9px", fontWeight: "800" }}>
+                          {threatIntelligence.alert.severity}
+                        </span>
+                      </div>
+
+                      <div style={{ display: "grid", gap: "5px", marginTop: "12px" }}>
+                        {threatIntelligence.alert.reasons.slice(0, 8).map((item, index) => (
+                          <div key={`${item}-${index}`} style={{ color: "#a78991", fontSize: "9px", lineHeight: "1.5" }}>
+                            • {item}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ padding: "20px" }}>
+                    <span style={{ color: "#66718a", fontSize: "8px", letterSpacing: "1.5px" }}>DEFENSIVE RECOMMENDATIONS</span>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: "8px", marginTop: "12px" }}>
+                      {threatIntelligence.alert.recommendations.map((item, index) => (
+                        <div key={`${item}-${index}`} style={{ padding: "10px", border: "1px solid #202638", borderRadius: "6px", background: "#0a0e16", color: "#8e99ad", fontSize: "9px", lineHeight: "1.5" }}>
+                          <span style={{ color: "#54d99a", marginRight: "6px" }}>✓</span>
+                          {item}
+                        </div>
+                      ))}
+                    </div>
+
+                    {threatIntelligence.alert.assessment && (
+                      <p style={{ margin: "14px 0 0", color: "#68738a", fontSize: "9px", lineHeight: "1.6" }}>
+                        {threatIntelligence.alert.assessment}
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
+            </section>
+          )}
+
+          {/* =================================================
+              DEFAULT EVIDENCE / ASSESSMENT
+              ================================================= */}
+
+          {!actorIntelligence && (
+
+            <section className="bottom-grid">
+
+              <div className="panel">
+
+                <div className="panel-header">
+
+                  <h3>
+                    Evidence Chain
+                  </h3>
+
+                </div>
+
+
+                {loading && (
+
+                  <div className="loading-row">
+                    Loading evidence...
+                  </div>
+
+                )}
+
+
+                {!loading &&
+                  evidenceNodes
+                    .slice(0, 5)
+                    .map(
+                      (
+                        evidence,
+                        index
+                      ) => (
+
+                        <div
+                          className="evidence-row"
+                          key={
+                            evidence.id
+                          }
+
+                          onClick={() =>
+                            setSelectedNode(
+                              evidence
+                            )
+                          }
+                        >
+
+                          <span>
+                            {String(
+                              index + 1
+                            ).padStart(
+                              2,
+                              "0"
+                            )}
+                          </span>
+
+
+                          <div>
+
+                            <strong>
+                              {
+                                evidence
+                                  .properties
+                                  ?.signal_type
+                              }
+                            </strong>
+
+                            <p>
+                              {
+                                evidence
+                                  .properties
+                                  ?.entity_key
+                              }
+                            </p>
+
+                          </div>
+
+
+                          <b>
+                            {(
+                              Number(
+                                evidence
+                                  .properties
+                                  ?.strength ||
+                                0
+                              ) * 100
+                            ).toFixed(0)}
+                            %
+                          </b>
+
+                        </div>
+
+                      )
+                    )}
+
+              </div>
+
+
+              <div className="panel assessment">
+
+                <div className="panel-header">
+
+                  <h3>
+                    Analyst Assessment
+                  </h3>
+
+                </div>
+
+
+                <div className="assessment-score">
+                  {assessmentConfidence.toFixed(
+                    2
+                  )}
+                </div>
+
+
+                <p>
+                  Multiple independent synthetic
+                  signals support a potential
+                  relationship between the observed
+                  actors.
+                </p>
+
+
+                <small>
+                  Intelligence assessment — not
+                  confirmed real-world attribution.
+                </small>
+
+              </div>
+
+            </section>
+
+          )}
+
+
+          {/* =================================================
+              FOOTER
+              ================================================= */}
+
+          <div className="data-footer">
+
+            <span>
+              DATA SOURCE: NEO4J
+            </span>
+
+            <span>
+              NODES:
+              {" "}
+              {statistics.node_count}
+            </span>
+
+            <span>
+              EDGES:
+              {" "}
+              {statistics.relationship_count}
+            </span>
+
+            <span>
+              EVIDENCE TYPES:
+              {" "}
+              {evidenceNodes.length}
+            </span>
+
+          </div>
+
+        </main>
+
+      </div>
+
+    </div>
+
+  );
+}
+
+
+export default App;
