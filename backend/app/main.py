@@ -23,8 +23,17 @@ from app.api.image_intelligence_api import router as image_intelligence_router
 from app.api.intelligence_report_pdf_api import router as intelligence_report_pdf_router
 
 app = FastAPI(title="DARKTRACE-X", description="Evidence-Driven Dark-Web Threat Intelligence Platform", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173","http://127.0.0.1:5173"],
-                   allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://darktrace-x.vercel.app",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(persona_router)
 app.include_router(post_router)
 app.include_router(signal_router)
