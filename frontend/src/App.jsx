@@ -1352,7 +1352,7 @@ function App() {
 
         const response =
           await fetch(
-            `${API_URL}/graph/evidence`
+            `${API_URL}/graph/intelligence`
           );
 
 
