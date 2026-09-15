@@ -1,24 +1,47 @@
+import os
+
 from app.neo4j_client import driver
+
+
+NEO4J_DATABASE = os.getenv(
+    "NEO4J_DATABASE",
+    "neo4j",
+)
+
+
+def _get_session():
+    """
+    Create a Neo4j session using the explicitly configured database.
+
+    This is important for Neo4j Aura because the application should
+    never rely on the driver's default database when a specific
+    NEO4J_DATABASE value has been configured.
+    """
+    return driver.session(
+        database=NEO4J_DATABASE
+    )
 
 
 def create_persona_node(
     persona_id: str,
     platform: str = "synthetic",
-    username: str = ""
+    username: str = "",
 ):
     query = """
     MERGE (p:Persona {id: $persona_id})
+
     SET p.platform = $platform,
         p.username = $username
+
     RETURN p
     """
 
-    with driver.session() as session:
+    with _get_session() as session:
         result = session.run(
             query,
             persona_id=persona_id,
             platform=platform,
-            username=username
+            username=username,
         )
 
         return result.single()
@@ -29,7 +52,7 @@ def create_relationship_edge(
     persona_b: str,
     confidence: float,
     status: str,
-    evidence: list[str] | None = None
+    evidence: list[str] | None = None,
 ):
     if evidence is None:
         evidence = []
@@ -37,21 +60,24 @@ def create_relationship_edge(
     query = """
     MERGE (a:Persona {id: $persona_a})
     MERGE (b:Persona {id: $persona_b})
+
     MERGE (a)-[r:RELATED_TO]->(b)
+
     SET r.confidence = $confidence,
         r.status = $status,
         r.evidence = $evidence
+
     RETURN a, r, b
     """
 
-    with driver.session() as session:
+    with _get_session() as session:
         result = session.run(
             query,
             persona_a=persona_a,
             persona_b=persona_b,
             confidence=confidence,
             status=status,
-            evidence=evidence
+            evidence=evidence,
         )
 
         return result.single()
@@ -62,12 +88,12 @@ def create_multi_actor_relationship(
     actor_b: str,
     confidence: float,
     relationship_type: str,
-    evidence: list[dict] | None = None
+    evidence: list[dict] | None = None,
 ):
     """
     Creates or updates a multi-actor intelligence relationship.
 
-    This represents an intelligence relationship assessment
+    The relationship represents an intelligence assessment
     based on correlated synthetic evidence.
 
     It does not establish confirmed real-world attribution.
@@ -77,7 +103,12 @@ def create_multi_actor_relationship(
         evidence = []
 
     evidence_types = [
-        str(item.get("signal_type", "unknown"))
+        str(
+            item.get(
+                "signal_type",
+                "unknown",
+            )
+        )
         for item in evidence
     ]
 
@@ -86,7 +117,7 @@ def create_multi_actor_relationship(
     for item in evidence:
         entities = item.get(
             "shared_entities",
-            []
+            [],
         )
 
         for entity in entities:
@@ -97,7 +128,7 @@ def create_multi_actor_relationship(
         str(
             item.get(
                 "explanation",
-                "Evidence observed"
+                "Evidence observed",
             )
         )
         for item in evidence
@@ -106,6 +137,9 @@ def create_multi_actor_relationship(
     query = """
     MERGE (a:Persona {id: $actor_a})
     MERGE (b:Persona {id: $actor_b})
+
+    SET a.platform = coalesce(a.platform, "synthetic"),
+        b.platform = coalesce(b.platform, "synthetic")
 
     MERGE (a)-[r:MULTI_ACTOR_RELATION]->(b)
 
@@ -125,7 +159,7 @@ def create_multi_actor_relationship(
         r.evidence_explanations AS evidence_explanations
     """
 
-    with driver.session() as session:
+    with _get_session() as session:
         result = session.run(
             query,
             actor_a=actor_a,
@@ -134,7 +168,7 @@ def create_multi_actor_relationship(
             relationship_type=relationship_type,
             evidence_types=evidence_types,
             shared_entities=shared_entities,
-            evidence_explanations=evidence_explanations
+            evidence_explanations=evidence_explanations,
         )
 
         record = result.single()
@@ -157,13 +191,14 @@ def create_multi_actor_relationship(
             ] or [],
             "evidence_explanations": record[
                 "evidence_explanations"
-            ] or []
+            ] or [],
         }
 
 
 def get_persona_graph():
     query = """
     MATCH (a:Persona)-[r:RELATED_TO]->(b)
+
     RETURN
         a.id AS persona_a,
         b.id AS persona_b,
@@ -172,7 +207,7 @@ def get_persona_graph():
         r.evidence AS evidence
     """
 
-    with driver.session() as session:
+    with _get_session() as session:
         result = session.run(query)
 
         return [
@@ -181,7 +216,7 @@ def get_persona_graph():
                 "persona_b": record["persona_b"],
                 "confidence": record["confidence"],
                 "status": record["status"],
-                "evidence": record["evidence"] or []
+                "evidence": record["evidence"] or [],
             }
             for record in result
         ]
@@ -206,7 +241,7 @@ def get_multi_actor_graph():
         r.evidence_explanations AS evidence_explanations
     """
 
-    with driver.session() as session:
+    with _get_session() as session:
         result = session.run(query)
 
         return [
@@ -225,7 +260,7 @@ def get_multi_actor_graph():
                 ] or [],
                 "evidence_explanations": record[
                     "evidence_explanations"
-                ] or []
+                ] or [],
             }
             for record in result
         ]
@@ -246,6 +281,7 @@ def get_intelligence_graph():
 
     node_query = """
     MATCH (p:Persona)
+
     RETURN
         p.id AS id,
         p.platform AS platform,
@@ -266,19 +302,25 @@ def get_intelligence_graph():
         r.evidence_explanations AS evidence_explanations
     """
 
-    with driver.session() as session:
+    with _get_session() as session:
 
-        node_result = session.run(node_query)
+        node_result = session.run(
+            node_query
+        )
 
         nodes = []
 
         for record in node_result:
-            nodes.append({
-                "id": record["id"],
-                "type": "actor",
-                "platform": record["platform"] or "synthetic",
-                "username": record["username"] or ""
-            })
+            nodes.append(
+                {
+                    "id": record["id"],
+                    "type": "actor",
+                    "platform": record["platform"]
+                    or "synthetic",
+                    "username": record["username"]
+                    or "",
+                }
+            )
 
         relationship_result = session.run(
             relationship_query
@@ -287,37 +329,48 @@ def get_intelligence_graph():
         relationships = []
 
         for record in relationship_result:
-            relationships.append({
-                "source": record["source"],
-                "target": record["target"],
-                "relationship": record["relationship"],
-                "confidence": record["confidence"],
-                "relationship_type": record[
-                    "relationship_type"
-                ],
-                "evidence_types": record[
-                    "evidence_types"
-                ] or [],
-                "shared_entities": record[
-                    "shared_entities"
-                ] or [],
-                "evidence_explanations": record[
-                    "evidence_explanations"
-                ] or []
-            })
+            relationships.append(
+                {
+                    "source": record["source"],
+                    "target": record["target"],
+                    "relationship": record[
+                        "relationship"
+                    ],
+                    "confidence": record[
+                        "confidence"
+                    ],
+                    "relationship_type": record[
+                        "relationship_type"
+                    ],
+                    "evidence_types": record[
+                        "evidence_types"
+                    ] or [],
+                    "shared_entities": record[
+                        "shared_entities"
+                    ] or [],
+                    "evidence_explanations": record[
+                        "evidence_explanations"
+                    ] or [],
+                }
+            )
 
     actor_ids = {
         node["id"]
         for node in nodes
     }
 
-    relationship_count = len(relationships)
+    relationship_count = len(
+        relationships
+    )
 
     high_confidence_relationships = sum(
         1
         for relationship in relationships
         if float(
-            relationship.get("confidence", 0.0)
+            relationship.get(
+                "confidence",
+                0.0,
+            )
         ) >= 0.80
     )
 
@@ -326,7 +379,7 @@ def get_intelligence_graph():
     for relationship in relationships:
         for evidence_type in relationship.get(
             "evidence_types",
-            []
+            [],
         ):
             evidence_type_set.add(
                 str(evidence_type)
@@ -339,11 +392,14 @@ def get_intelligence_graph():
             "actors": len(actor_ids),
             "nodes": len(nodes),
             "relationships": relationship_count,
-            "high_confidence_relationships":
-                high_confidence_relationships,
-            "evidence_categories":
-                len(evidence_type_set),
-            "evidence_types":
-                sorted(evidence_type_set)
-        }
+            "high_confidence_relationships": (
+                high_confidence_relationships
+            ),
+            "evidence_categories": len(
+                evidence_type_set
+            ),
+            "evidence_types": sorted(
+                evidence_type_set
+            ),
+        },
     }
