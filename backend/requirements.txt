@@ -4,6 +4,7 @@ pydantic
 python-dotenv
 sqlalchemy
 psycopg2-binary
+psycopg[binary]
 neo4j
 python-multipart
 reportlab
