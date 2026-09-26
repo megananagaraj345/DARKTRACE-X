@@ -270,11 +270,12 @@ def get_intelligence_graph():
     """
     Returns a unified intelligence graph for the analyst layer.
 
-    The graph contains:
-    - Persona nodes
-    - Multi-actor relationships
-    - Relationship evidence
-    - Derived statistics
+    The original graph structure is preserved.
+    This additionally supports:
+    - RELATED_TO relationships
+    - MULTI_ACTOR_RELATION relationships
+    - EvidenceNode records connected to actor pairs
+    - Existing persona nodes and statistics
 
     Data is limited to the synthetic investigation environment.
     """
@@ -289,20 +290,54 @@ def get_intelligence_graph():
     """
 
     relationship_query = """
-    MATCH (a:Persona)-[r:MULTI_ACTOR_RELATION]->(b)
+    MATCH (a:Persona)-[r]->(b:Persona)
+    WHERE type(r) IN [
+        'RELATED_TO',
+        'MULTI_ACTOR_RELATION'
+    ]
+
+    OPTIONAL MATCH (e:EvidenceNode)
+    WHERE
+        (
+            e.actor_a = a.id
+            AND e.actor_b = b.id
+        )
+        OR
+        (
+            e.actor_a = b.id
+            AND e.actor_b = a.id
+        )
 
     RETURN
         a.id AS source,
         b.id AS target,
         type(r) AS relationship,
         r.confidence AS confidence,
-        r.relationship_type AS relationship_type,
-        r.evidence_types AS evidence_types,
-        r.shared_entities AS shared_entities,
-        r.evidence_explanations AS evidence_explanations
+
+        coalesce(
+            r.relationship_type,
+            r.status,
+            'intelligence_relationship'
+        ) AS relationship_type,
+
+        collect(
+            DISTINCT e.signal_type
+        ) AS evidence_types,
+
+        collect(
+            DISTINCT e.shared_entities
+        ) AS shared_entities,
+
+        collect(
+            DISTINCT e.explanation
+        ) AS evidence_explanations
     """
 
     with _get_session() as session:
+
+        # ---------------------------------
+        # PERSONA / ACTOR NODES
+        # ---------------------------------
 
         node_result = session.run(
             node_query
@@ -311,16 +346,25 @@ def get_intelligence_graph():
         nodes = []
 
         for record in node_result:
+
             nodes.append(
                 {
                     "id": record["id"],
                     "type": "actor",
-                    "platform": record["platform"]
-                    or "synthetic",
-                    "username": record["username"]
-                    or "",
+                    "platform": (
+                        record["platform"]
+                        or "synthetic"
+                    ),
+                    "username": (
+                        record["username"]
+                        or ""
+                    ),
                 }
             )
+
+        # ---------------------------------
+        # RELATIONSHIPS + EVIDENCE
+        # ---------------------------------
 
         relationship_result = session.run(
             relationship_query
@@ -329,6 +373,75 @@ def get_intelligence_graph():
         relationships = []
 
         for record in relationship_result:
+
+            raw_evidence_types = (
+                record["evidence_types"]
+                or []
+            )
+
+            evidence_types = [
+                str(item)
+                for item in raw_evidence_types
+                if item is not None
+                and str(item).strip()
+            ]
+
+            # Flatten shared entity lists.
+            shared_entities = []
+
+            for item in (
+                record["shared_entities"]
+                or []
+            ):
+
+                if isinstance(item, list):
+
+                    for entity in item:
+
+                        if (
+                            entity is not None
+                            and entity
+                            not in shared_entities
+                        ):
+                            shared_entities.append(
+                                entity
+                            )
+
+                elif (
+                    item is not None
+                    and item
+                    not in shared_entities
+                ):
+
+                    shared_entities.append(
+                        item
+                    )
+
+            raw_explanations = (
+                record[
+                    "evidence_explanations"
+                ]
+                or []
+            )
+
+            evidence_explanations = [
+                str(item)
+                for item in raw_explanations
+                if item is not None
+                and str(item).strip()
+            ]
+
+            confidence = record[
+                "confidence"
+            ]
+
+            if confidence is None:
+                confidence = 0.0
+            else:
+                confidence = float(
+                    confidence
+                )
+
             relationships.append(
                 {
                     "source": record["source"],
@@ -336,70 +449,73 @@ def get_intelligence_graph():
                     "relationship": record[
                         "relationship"
                     ],
-                    "confidence": record[
-                        "confidence"
-                    ],
+                    "confidence": confidence,
                     "relationship_type": record[
                         "relationship_type"
                     ],
-                    "evidence_types": record[
-                        "evidence_types"
-                    ] or [],
-                    "shared_entities": record[
-                        "shared_entities"
-                    ] or [],
-                    "evidence_explanations": record[
-                        "evidence_explanations"
-                    ] or [],
+                    "evidence_types":
+                        evidence_types,
+                    "shared_entities":
+                        shared_entities,
+                    "evidence_explanations":
+                        evidence_explanations,
                 }
             )
 
-    actor_ids = {
-        node["id"]
-        for node in nodes
-    }
+        # ---------------------------------
+        # STATISTICS
+        # ---------------------------------
 
-    relationship_count = len(
-        relationships
-    )
+        actor_ids = {
+            node["id"]
+            for node in nodes
+        }
 
-    high_confidence_relationships = sum(
-        1
-        for relationship in relationships
-        if float(
-            relationship.get(
-                "confidence",
-                0.0,
-            )
-        ) >= 0.80
-    )
+        relationship_count = len(
+            relationships
+        )
 
-    evidence_type_set = set()
+        high_confidence_relationships = sum(
+            1
+            for relationship in relationships
+            if float(
+                relationship.get(
+                    "confidence",
+                    0.0,
+                )
+            ) >= 0.80
+        )
 
-    for relationship in relationships:
-        for evidence_type in relationship.get(
-            "evidence_types",
-            [],
-        ):
-            evidence_type_set.add(
-                str(evidence_type)
-            )
+        evidence_type_set = set()
 
-    return {
-        "nodes": nodes,
-        "relationships": relationships,
-        "statistics": {
-            "actors": len(actor_ids),
-            "nodes": len(nodes),
-            "relationships": relationship_count,
-            "high_confidence_relationships": (
-                high_confidence_relationships
-            ),
-            "evidence_categories": len(
-                evidence_type_set
-            ),
-            "evidence_types": sorted(
-                evidence_type_set
-            ),
-        },
-    }
+        for relationship in relationships:
+
+            for evidence_type in relationship.get(
+                "evidence_types",
+                [],
+            ):
+
+                if evidence_type:
+                    evidence_type_set.add(
+                        str(evidence_type)
+                    )
+
+        return {
+            "nodes": nodes,
+            "relationships": relationships,
+            "statistics": {
+                "actors": len(actor_ids),
+                "nodes": len(nodes),
+                "relationships":
+                    relationship_count,
+                "high_confidence_relationships":
+                    high_confidence_relationships,
+                "evidence_categories":
+                    len(evidence_type_set),
+                "evidence_types":
+                    sorted(
+                        evidence_type_set
+                    ),
+            },
+        }
+
