@@ -18,7 +18,7 @@ import {
 
 import "./App.css";
 
-const API_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const API_URL = import.meta.env.VITE_API_BASE_URL || "http://192.168.29.156:8000";
 
 
 /* =========================================================
@@ -1000,7 +1000,7 @@ function FinalAnalystWorkbench({
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",
             gap: "8px",
           }}
         >
@@ -1181,11 +1181,798 @@ function FinalAnalystWorkbench({
 }
 
 
+
+/* =========================================================
+   ADDITIVE — DATA INGESTION WORKBENCH
+   Presentation + local staging only.
+   Existing intelligence APIs and graph logic are untouched.
+   ========================================================= */
+
+function parseIngestionCSV(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  if (!lines.length) return [];
+
+  const headers = lines[0]
+    .split(",")
+    .map(value => value.trim().replace(/^["']|["']$/g, ""));
+
+  return lines.slice(1).map(line => {
+    const values = line.split(",").map(value =>
+      value.trim().replace(/^["']|["']$/g, "")
+    );
+
+    return headers.reduce((row, header, index) => {
+      row[header || `field_${index + 1}`] = values[index] ?? "";
+      return row;
+    }, {});
+  });
+}
+
+function normalizeIngestionRows(rows) {
+  if (!Array.isArray(rows)) return [];
+
+  return rows
+    .map(item => {
+      if (typeof item === "string") {
+        return { text: item };
+      }
+
+      if (item && typeof item === "object") {
+        return { ...item };
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function analyzeIngestionRecords(rows, manualText = "") {
+  const normalized = normalizeIngestionRows(rows);
+  const manual = String(manualText || "").trim();
+
+  const texts = normalized
+    .map(row =>
+      row.text ||
+      row.content ||
+      row.message ||
+      row.post ||
+      row.body ||
+      row.description ||
+      ""
+    )
+    .map(value => String(value).trim())
+    .filter(Boolean);
+
+  if (manual) {
+    texts.push(manual);
+  }
+
+  const combinedText = texts.join(" ").trim();
+  const words = combinedText
+    ? combinedText.split(/\s+/).filter(Boolean)
+    : [];
+
+  const sentences = combinedText
+    ? combinedText.split(/[.!?]+/).map(value => value.trim()).filter(Boolean)
+    : [];
+
+  const uniqueWords = new Set(
+    words.map(word => word.toLowerCase())
+  );
+
+  const technicalTokens = words.filter(word =>
+    /[0-9_\-:/\\.]/.test(word)
+  );
+
+  const timestamps = normalized
+    .map(row =>
+      row.timestamp ||
+      row.time ||
+      row.created_at ||
+      row.event_time ||
+      row.date ||
+      ""
+    )
+    .filter(Boolean);
+
+  const hours = timestamps
+    .map(value => new Date(value).getUTCHours())
+    .filter(hour => Number.isFinite(hour));
+
+  const nightEvents = hours.filter(
+    hour => hour >= 20 || hour < 6
+  );
+
+  const actorIds = normalized
+    .map(row =>
+      row.actor_id ||
+      row.actorId ||
+      row.username ||
+      row.actor ||
+      ""
+    )
+    .map(value => String(value).trim())
+    .filter(Boolean);
+
+  const platforms = normalized
+    .map(row =>
+      row.platform ||
+      row.source ||
+      row.channel ||
+      ""
+    )
+    .map(value => String(value).trim())
+    .filter(Boolean);
+
+  const aliases = normalized
+    .flatMap(row => {
+      const value = row.aliases || row.alias || "";
+      return Array.isArray(value)
+        ? value
+        : String(value).split(/[,;|]+/);
+    })
+    .map(value => String(value).trim())
+    .filter(Boolean);
+
+  const infrastructure = normalized
+    .flatMap(row => {
+      const values = [
+        row.infrastructure,
+        row.domain,
+        row.domains,
+        row.server,
+        row.server_id,
+        row.wallet,
+        row.wallet_id
+      ];
+
+      return values.flatMap(value =>
+        Array.isArray(value)
+          ? value
+          : value
+            ? String(value).split(/[,;|]+/)
+            : []
+      );
+    })
+    .map(value => String(value).trim())
+    .filter(Boolean);
+
+  const signalTypes = new Set();
+
+  if (texts.length) signalTypes.add("stylometry");
+  if (timestamps.length) signalTypes.add("temporal_pattern");
+  if (platforms.length) signalTypes.add("platform_activity");
+  if (infrastructure.length) signalTypes.add("infrastructure");
+  if (aliases.length) signalTypes.add("alias");
+
+  const technicalTokenRatio =
+    technicalTokens.length / Math.max(words.length, 1);
+
+  const uniqueWordRatio =
+    uniqueWords.size / Math.max(words.length, 1);
+
+  const averageWordLength =
+    words.length
+      ? words.reduce((sum, word) => sum + word.length, 0) / words.length
+      : 0;
+
+  const averageSentenceLength =
+    words.length / Math.max(sentences.length, 1);
+
+  const nightActivityRatio =
+    nightEvents.length / Math.max(hours.length, 1);
+
+  const sampleSize =
+    normalized.length + (manual ? 1 : 0);
+
+  const confidence = calibrateAnalyticalConfidence(
+    texts.length ? Math.min(0.88, 0.48 + technicalTokenRatio * 0.3) : 0.42,
+    sampleSize,
+    signalTypes.size
+  );
+
+  return {
+    records: sampleSize,
+    text_samples: texts.length,
+    timestamps: timestamps.length,
+    actor_candidates: [...new Set(actorIds)],
+    platforms: [...new Set(platforms)],
+    aliases: [...new Set(aliases)],
+    infrastructure: [...new Set(infrastructure)],
+    signal_types: [...signalTypes],
+    behavioral: {
+      word_count: words.length,
+      sentence_count: sentences.length,
+      unique_word_ratio: Number(uniqueWordRatio.toFixed(3)),
+      technical_token_ratio: Number(technicalTokenRatio.toFixed(3)),
+      average_word_length: Number(averageWordLength.toFixed(2)),
+      average_sentence_length: Number(averageSentenceLength.toFixed(2))
+    },
+    temporal: {
+      event_count: timestamps.length,
+      active_hour_count: new Set(hours).size,
+      night_activity_ratio: Number(nightActivityRatio.toFixed(3)),
+      peak_hours_utc: [...new Set(hours)].sort((a, b) => a - b)
+    },
+    confidence
+  };
+}
+
+function DataIngestionPanel({ onClose, onInject }) {
+  const [actorId, setActorId] = useState("");
+  const [platform, setPlatform] = useState("synthetic_forum");
+  const [activityText, setActivityText] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [records, setRecords] = useState([]);
+  const [analysis, setAnalysis] = useState(null);
+  const [status, setStatus] = useState("");
+
+  async function handleFileChange(event) {
+    const file = event.target.files?.[0];
+
+    if (!file) return;
+
+    setFileName(file.name);
+    setStatus("");
+    setAnalysis(null);
+
+    try {
+      const content = await file.text();
+      const lowerName = file.name.toLowerCase();
+
+      let parsed;
+
+      if (lowerName.endsWith(".json")) {
+        const json = JSON.parse(content);
+        parsed = Array.isArray(json)
+          ? json
+          : json.records || json.data || json.results || [json];
+      } else if (lowerName.endsWith(".csv")) {
+        parsed = parseIngestionCSV(content);
+      } else {
+        parsed = content
+          .split(/\r?\n/)
+          .map(line => line.trim())
+          .filter(Boolean)
+          .map(text => ({ text }));
+      }
+
+      const normalized = normalizeIngestionRows(parsed);
+      setRecords(normalized);
+
+      const first = normalized[0];
+
+      if (!actorId && first) {
+        setActorId(
+          String(
+            first.actor_id ||
+            first.actorId ||
+            first.username ||
+            first.actor ||
+            ""
+          )
+        );
+      }
+
+      if (first) {
+        setPlatform(
+          String(
+            first.platform ||
+            first.source ||
+            first.channel ||
+            platform ||
+            "synthetic_forum"
+          )
+        );
+      }
+
+      setStatus(
+        `${normalized.length} record(s) loaded and ready for analysis.`
+      );
+    } catch (err) {
+      setRecords([]);
+      setStatus(
+        `Unable to read file: ${err.message || "invalid file format"}`
+      );
+    }
+  }
+
+  function runAnalysis() {
+    const result = analyzeIngestionRecords(records, activityText);
+    setAnalysis(result);
+
+    if (!result.records) {
+      setStatus("Add a TXT, CSV, JSON record, or manual activity first.");
+      return;
+    }
+
+    setStatus(
+      `Analysis staged successfully — ${result.signal_types.length} signal type(s) extracted.`
+    );
+  }
+
+  async function sendToControlledLab() {
+    if (!analysis) {
+      runAnalysis();
+      return;
+    }
+
+    if (!actorId.trim()) {
+      setStatus("Enter an actor ID before sending activity to the controlled lab.");
+      return;
+    }
+
+    const signalType =
+      analysis.signal_types[0] ||
+      "behavioral_pattern";
+
+    setStatus("Sending one synthetic/authorized activity event to the controlled lab...");
+
+    try {
+      await onInject(actorId.trim(), signalType);
+      setStatus("Activity accepted by the existing controlled investigation pipeline.");
+    } catch (err) {
+      setStatus(
+        err.message ||
+        "Controlled lab injection failed."
+      );
+    }
+  }
+
+  const metricStyle = {
+    padding: "11px",
+    border: "1px solid #1d2a39",
+    borderRadius: "7px",
+    background: "#0a1119"
+  };
+
+  return (
+    <section
+      className="panel"
+      style={{
+        marginBottom: "14px",
+        border: "1px solid #29445b",
+        background:
+          "linear-gradient(145deg, #0d1722, #080e16)",
+        boxShadow:
+          "0 18px 50px rgba(0,0,0,0.28)"
+      }}
+    >
+      <div
+        className="panel-header"
+        style={{
+          padding: "15px 16px"
+        }}
+      >
+        <div>
+          <h3>DATA INGESTION WORKBENCH</h3>
+          <small>
+            LOAD → EXTRACT → ANALYZE → STAGE
+          </small>
+        </div>
+
+        <button
+          type="button"
+          className="close-button"
+          onClick={onClose}
+          aria-label="Close data ingestion"
+        >
+          ×
+        </button>
+      </div>
+
+      <div style={{ padding: "14px" }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+            gap: "9px",
+            marginBottom: "10px"
+          }}
+        >
+          <label style={metricStyle}>
+            <span
+              style={{
+                display: "block",
+                color: "#667890",
+                fontSize: "7px",
+                letterSpacing: "1.2px",
+                marginBottom: "6px"
+              }}
+            >
+              ACTOR ID
+            </span>
+
+            <input
+              value={actorId}
+              onChange={event => setActorId(event.target.value)}
+              placeholder="actor_alpha_001"
+              style={{
+                width: "100%",
+                padding: "9px",
+                background: "#070d15",
+                color: "#dce7f2",
+                border: "1px solid #26364b",
+                borderRadius: "6px"
+              }}
+            />
+          </label>
+
+          <label style={metricStyle}>
+            <span
+              style={{
+                display: "block",
+                color: "#667890",
+                fontSize: "7px",
+                letterSpacing: "1.2px",
+                marginBottom: "6px"
+              }}
+            >
+              PLATFORM / SOURCE
+            </span>
+
+            <input
+              value={platform}
+              onChange={event => setPlatform(event.target.value)}
+              placeholder="synthetic_forum"
+              style={{
+                width: "100%",
+                padding: "9px",
+                background: "#070d15",
+                color: "#dce7f2",
+                border: "1px solid #26364b",
+                borderRadius: "6px"
+              }}
+            />
+          </label>
+
+          <label style={metricStyle}>
+            <span
+              style={{
+                display: "block",
+                color: "#667890",
+                fontSize: "7px",
+                letterSpacing: "1.2px",
+                marginBottom: "6px"
+              }}
+            >
+              DATA FILE
+            </span>
+
+            <input
+              type="file"
+              accept=".csv,.json,.txt"
+              onChange={handleFileChange}
+              style={{
+                width: "100%",
+                padding: "6px",
+                background: "#070d15",
+                color: "#93a4b8",
+                border: "1px solid #26364b",
+                borderRadius: "6px",
+                fontSize: "8px"
+              }}
+            />
+
+            {fileName && (
+              <span
+                style={{
+                  display: "block",
+                  marginTop: "5px",
+                  color: "#54d99a",
+                  fontSize: "7px",
+                  overflowWrap: "anywhere"
+                }}
+              >
+                {fileName}
+              </span>
+            )}
+          </label>
+        </div>
+
+        <label
+          style={{
+            display: "block",
+            padding: "11px",
+            border: "1px solid #1d2a39",
+            borderRadius: "7px",
+            background: "#0a1119"
+          }}
+        >
+          <span
+            style={{
+              display: "block",
+              color: "#667890",
+              fontSize: "7px",
+              letterSpacing: "1.2px",
+              marginBottom: "6px"
+            }}
+          >
+            MANUAL ACTIVITY / POST CONTENT
+          </span>
+
+          <textarea
+            value={activityText}
+            onChange={event => setActivityText(event.target.value)}
+            placeholder="Paste synthetic or authorized activity for analysis..."
+            rows={4}
+            style={{
+              width: "100%",
+              resize: "vertical",
+              padding: "10px",
+              background: "#070d15",
+              color: "#dce7f2",
+              border: "1px solid #26364b",
+              borderRadius: "6px",
+              lineHeight: 1.5
+            }}
+          />
+        </label>
+
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "8px",
+            marginTop: "10px"
+          }}
+        >
+          <button
+            type="button"
+            onClick={runAnalysis}
+            style={{
+              padding: "9px 13px",
+              border: "1px solid #285346",
+              borderRadius: "7px",
+              background: "#0d1b18",
+              color: "#83cdb2",
+              fontSize: "8px",
+              fontWeight: 800,
+              letterSpacing: "0.9px",
+              cursor: "pointer"
+            }}
+          >
+            ANALYZE DATA
+          </button>
+
+          <button
+            type="button"
+            onClick={sendToControlledLab}
+            disabled={!analysis && !records.length && !activityText.trim()}
+            style={{
+              padding: "9px 13px",
+              border: "1px solid #294b6b",
+              borderRadius: "7px",
+              background: "#0c1825",
+              color: "#8fc5ff",
+              fontSize: "8px",
+              fontWeight: 800,
+              letterSpacing: "0.9px",
+              cursor: "pointer",
+              opacity:
+                !analysis && !records.length && !activityText.trim()
+                  ? 0.45
+                  : 1
+            }}
+          >
+            SEND TO CONTROLLED LAB
+          </button>
+        </div>
+
+        {status && (
+          <div
+            style={{
+              marginTop: "10px",
+              padding: "9px 11px",
+              border: "1px solid #20344a",
+              borderRadius: "6px",
+              background: "#09121c",
+              color: "#8296ac",
+              fontSize: "8px"
+            }}
+          >
+            {status}
+          </div>
+        )}
+
+        {analysis && (
+          <div style={{ marginTop: "12px" }}>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                gap: "7px"
+              }}
+            >
+              {[
+                ["RECORDS", analysis.records],
+                ["TEXT SAMPLES", analysis.text_samples],
+                ["SIGNAL TYPES", analysis.signal_types.length],
+                ["CONFIDENCE", `${(analysis.confidence * 100).toFixed(0)}%`]
+              ].map(([label, value]) => (
+                <div key={label} style={metricStyle}>
+                  <span
+                    style={{
+                      display: "block",
+                      color: "#5f7087",
+                      fontSize: "6.5px",
+                      letterSpacing: "1px"
+                    }}
+                  >
+                    {label}
+                  </span>
+
+                  <strong
+                    style={{
+                      display: "block",
+                      marginTop: "5px",
+                      color: "#e3ebf5",
+                      fontSize: "15px"
+                    }}
+                  >
+                    {value}
+                  </strong>
+                </div>
+              ))}
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                gap: "9px",
+                marginTop: "9px"
+              }}
+            >
+              <div style={metricStyle}>
+                <span
+                  style={{
+                    display: "block",
+                    color: "#65778d",
+                    fontSize: "7px",
+                    letterSpacing: "1px",
+                    marginBottom: "7px"
+                  }}
+                >
+                  EXTRACTED SIGNALS
+                </span>
+
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: "5px"
+                  }}
+                >
+                  {analysis.signal_types.map(signal => (
+                    <span
+                      key={signal}
+                      style={{
+                        padding: "5px 7px",
+                        border: "1px solid #285346",
+                        borderRadius: "5px",
+                        background: "#0d1b18",
+                        color: "#83cdb2",
+                        fontSize: "7px"
+                      }}
+                    >
+                      {signal.replaceAll("_", " ")}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              <div style={metricStyle}>
+                <span
+                  style={{
+                    display: "block",
+                    color: "#65778d",
+                    fontSize: "7px",
+                    letterSpacing: "1px",
+                    marginBottom: "7px"
+                  }}
+                >
+                  BEHAVIORAL PROFILE
+                </span>
+
+                <div
+                  style={{
+                    color: "#91a3b7",
+                    fontSize: "8px",
+                    lineHeight: 1.7
+                  }}
+                >
+                  Words: {analysis.behavioral.word_count}
+                  {" • "}
+                  Sentences: {analysis.behavioral.sentence_count}
+                  <br />
+                  Technical ratio: {(analysis.behavioral.technical_token_ratio * 100).toFixed(0)}%
+                  {" • "}
+                  Unique ratio: {(analysis.behavioral.unique_word_ratio * 100).toFixed(0)}%
+                  <br />
+                  Night activity: {(analysis.temporal.night_activity_ratio * 100).toFixed(0)}%
+                </div>
+              </div>
+            </div>
+
+            <div
+              style={{
+                marginTop: "9px",
+                padding: "9px 11px",
+                borderLeft: "2px solid #4ea1ff",
+                background: "#09131f",
+                color: "#72869d",
+                fontSize: "7.5px",
+                lineHeight: 1.55
+              }}
+            >
+              Staged ingestion analysis is an analytical aid. It does not establish
+              real-world identity or attribution. Use synthetic or authorized data
+              for the controlled investigation workflow.
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 /* =========================================================
    APP
    ========================================================= */
 
 function App() {
+
+  /* =====================================================
+     ADDITIVE — DATA INGESTION UI STATE
+     Existing investigation state remains unchanged.
+     ===================================================== */
+
+  const [showDataIngestion, setShowDataIngestion] = useState(false);
+
+  const [activeView, setActiveView] = useState("overview");
+
+  const navigateTo = (view, sectionId = null) => {
+    setActiveView(view);
+    setShowDataIngestion(view === "data-ingestion");
+
+    if (view === "data-ingestion") {
+      window.setTimeout(() => {
+        const panel = document.getElementById("data-ingestion-section");
+        if (panel) {
+          panel.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 50);
+      return;
+    }
+
+    if (view === "overview") {
+      const main = document.querySelector(".main-content");
+      if (main) {
+        main.scrollTo({ top: 0, behavior: "smooth" });
+      } else {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+      return;
+    }
+
+    window.setTimeout(() => {
+      const element = document.getElementById(sectionId);
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else {
+        const actorPanel = document.getElementById("actors-section");
+        if (actorPanel) {
+          actorPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }
+    }, 50);
+  };
+
 
   const [graph, setGraph] =
     useState(null);
@@ -1339,66 +2126,319 @@ function App() {
      LOAD REAL NEO4J GRAPH
      ===================================================== */
 
-  useEffect(() => {
+  async function loadGraphFromBackend(silent = false) {
 
-    async function loadGraph() {
+    try {
+
+      if (!silent) {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const intelligenceResponse =
+        await fetch(
+          `${API_URL}/graph/intelligence`
+        );
+
+      if (!intelligenceResponse.ok) {
+
+        throw new Error(
+          `Backend returned ${intelligenceResponse.status}`
+        );
+
+      }
+
+      const intelligenceData =
+        await intelligenceResponse.json();
+
+      const intelligenceGraph =
+        intelligenceData?.graph || {
+          nodes: [],
+          relationships: [],
+          statistics: {}
+        };
+
+      /*
+       * The intelligence endpoint contains the existing actor/campaign
+       * intelligence graph. The evidence endpoint contains persistent
+       * Persona/EvidenceNode/RelationshipAssessment records, including
+       * controlled-lab evidence written by the backend.
+       *
+       * Merge both sources so persisted lab events remain visible after
+       * a frontend refresh/reload instead of existing only as local state.
+       */
+      let mergedNodes = Array.isArray(intelligenceGraph.nodes)
+        ? [...intelligenceGraph.nodes]
+        : [];
+
+      let mergedRelationships = Array.isArray(intelligenceGraph.relationships)
+        ? [...intelligenceGraph.relationships]
+        : [];
 
       try {
 
-        setLoading(true);
-
-        setError("");
-
-
-        const response =
+        const evidenceResponse =
           await fetch(
-            `${API_URL}/graph/intelligence`
+            `${API_URL}/graph/evidence`
           );
 
+        if (evidenceResponse.ok) {
 
-        if (!response.ok) {
+          const evidenceData =
+            await evidenceResponse.json();
 
-          throw new Error(
-            `Backend returned ${response.status}`
+          const evidenceNodes =
+            Array.isArray(evidenceData?.nodes)
+              ? evidenceData.nodes
+              : [];
+
+          const evidenceRelationships =
+            Array.isArray(evidenceData?.relationships)
+              ? evidenceData.relationships
+              : [];
+
+          const nodeIdMap = new Map();
+
+          evidenceNodes.forEach(node => {
+
+            const properties =
+              node?.properties || {};
+
+            const canonicalId =
+              properties.id ||
+              properties.actor_id ||
+              node?.node_id;
+
+            if (node?.node_id && canonicalId) {
+              nodeIdMap.set(
+                String(node.node_id),
+                String(canonicalId)
+              );
+            }
+
+          });
+
+          const existingNodeIds = new Set(
+            mergedNodes.map(node =>
+              String(
+                node?.id ||
+                node?.properties?.id ||
+                ""
+              )
+            )
           );
+
+          evidenceNodes.forEach(node => {
+
+            const properties =
+              node?.properties || {};
+
+            const labels =
+              Array.isArray(node?.labels)
+                ? node.labels
+                : [];
+
+            const canonicalId =
+              properties.id ||
+              properties.actor_id ||
+              node?.node_id;
+
+            if (!canonicalId) {
+              return;
+            }
+
+            const isEvidence =
+              labels.includes("EvidenceNode") ||
+              properties.type === "evidence";
+
+            const isActor =
+              labels.includes("Persona") ||
+              properties.type === "actor";
+
+            if (
+              !isEvidence &&
+              !isActor
+            ) {
+              return;
+            }
+
+            if (
+              isActor &&
+              existingNodeIds.has(String(canonicalId))
+            ) {
+              return;
+            }
+
+            if (!existingNodeIds.has(String(canonicalId))) {
+
+              mergedNodes.push({
+                id: String(canonicalId),
+                type: isEvidence ? "evidence" : "actor",
+                label:
+                  properties.label ||
+                  properties.signal_type ||
+                  properties.username ||
+                  String(canonicalId),
+                platform:
+                  properties.platform ||
+                  "synthetic",
+                username:
+                  properties.username ||
+                  "",
+                properties: {
+                  ...properties,
+                  id: String(canonicalId)
+                }
+              });
+
+              existingNodeIds.add(
+                String(canonicalId)
+              );
+
+            }
+
+          });
+
+          const relationshipKeys = new Set(
+            mergedRelationships.map(relationship =>
+              [
+                relationship?.source,
+                relationship?.target,
+                relationship?.relationship
+              ].join("|")
+            )
+          );
+
+          evidenceRelationships.forEach(relationship => {
+
+            const source =
+              nodeIdMap.get(
+                String(relationship?.source)
+              ) ||
+              String(relationship?.source || "");
+
+            const target =
+              nodeIdMap.get(
+                String(relationship?.target)
+              ) ||
+              String(relationship?.target || "");
+
+            if (!source || !target) {
+              return;
+            }
+
+            const normalizedRelationship = {
+              source,
+              target,
+              relationship:
+                relationship?.relationship ||
+                "EVIDENCE_RELATION",
+              properties:
+                relationship?.properties || {}
+            };
+
+            const key = [
+              source,
+              target,
+              normalizedRelationship.relationship
+            ].join("|");
+
+            if (!relationshipKeys.has(key)) {
+              mergedRelationships.push(
+                normalizedRelationship
+              );
+              relationshipKeys.add(key);
+            }
+
+          });
 
         }
 
+      }
+      catch (evidenceError) {
 
-        const data =
-          await response.json();
-
-
-        setGraph(
-          data.graph
+        /*
+         * Evidence loading is additive. If the optional evidence endpoint
+         * is unavailable, retain the original intelligence graph.
+         */
+        console.warn(
+          "DARKTRACE-X persistent evidence graph unavailable:",
+          evidenceError
         );
 
       }
 
-      catch (err) {
+      const nodeCount =
+        mergedNodes.length;
 
-        console.error(
-          "DARKTRACE-X graph error:",
-          err
-        );
+      const relationshipCount =
+        mergedRelationships.length;
 
+      const actorCount =
+        mergedNodes.filter(
+          node => node?.type === "actor"
+        ).length;
 
-        setError(
-          "Unable to connect to DARKTRACE-X backend."
-        );
+      const evidenceCount =
+        mergedNodes.filter(
+          node => node?.type === "evidence"
+        ).length;
 
-      }
+      const assessmentCount =
+        mergedNodes.filter(
+          node => node?.type === "assessment"
+        ).length;
 
-      finally {
+      setGraph({
+        ...intelligenceGraph,
+        nodes: mergedNodes,
+        relationships: mergedRelationships,
+        statistics: {
+          ...(intelligenceGraph.statistics || {}),
+          node_count: nodeCount,
+          relationship_count: relationshipCount,
+          actor_nodes: actorCount,
+          evidence_nodes: evidenceCount,
+          assessment_nodes: assessmentCount
+        }
+      });
 
+      return {
+        nodes: mergedNodes,
+        relationships: mergedRelationships
+      };
+
+    }
+    catch (err) {
+
+      console.error(
+        "DARKTRACE-X graph error:",
+        err
+      );
+
+      setError(
+        "Unable to connect to DARKTRACE-X backend."
+      );
+
+      throw err;
+
+    }
+    finally {
+
+      if (!silent) {
         setLoading(false);
-
       }
 
     }
 
+  }
 
-    loadGraph();
+
+  useEffect(() => {
+
+    loadGraphFromBackend()
+      .catch(() => {});
 
   }, []);
 
@@ -1853,17 +2893,24 @@ function App() {
      BATCH 7 — CONTROLLED INVESTIGATION LAB
      ===================================================== */
 
-  async function injectControlledActivity(signalType = "shared_infrastructure") {
-    if (!actorIntelligence) {
+  async function injectControlledActivity(
+    signalType = "shared_infrastructure",
+    actorOverride = null,
+    focusActor = false
+  ) {
+    if (!actorIntelligence && !actorOverride) {
       setLabError("Select an actor before injecting controlled synthetic activity.");
       return;
     }
 
     const actorId =
-      actorIntelligence.actorId ||
-      selectedNode?.properties?.id ||
-      selectedNode?.id ||
-      "unknown_actor";
+      String(
+        actorOverride ||
+        actorIntelligence?.actorId ||
+        selectedNode?.properties?.id ||
+        selectedNode?.id ||
+        "unknown_actor"
+      ).trim();
 
     const stages = [
       "NEW ACTIVITY",
@@ -1944,6 +2991,37 @@ function App() {
       setLabPipeline(stages.map(label => ({ label, status: "complete" })));
       setIntelligenceReport(null);
       setReportGeneratedAt(null);
+
+      /*
+       * Refresh from Neo4j after the backend confirms the event.
+       * This makes the newly persisted EvidenceNode part of the real
+       * graph state, not just the temporary live-evidence overlay.
+       */
+      const refreshedGraph =
+        await loadGraphFromBackend(true);
+
+      if (focusActor) {
+        const actorNode =
+          refreshedGraph?.nodes?.find(
+            node =>
+              node?.type === "actor" &&
+              String(
+                node?.properties?.id ||
+                node?.id ||
+                ""
+              ) === actorId
+          );
+
+        if (actorNode) {
+          setSelectedNode(actorNode);
+        }
+      }
+
+      if (result?.persistence?.persisted === false) {
+        setLabError(
+          "Activity was accepted, but persistent graph storage was unavailable. The live evidence overlay remains available."
+        );
+      }
     } catch (err) {
       console.error("DARKTRACE-X controlled investigation lab error:", err);
       setLabError(err.message || "Unable to inject controlled synthetic activity.");
@@ -2113,14 +3191,10 @@ function App() {
       const connectedLinks =
         graph.relationships.filter(
           relationship =>
-            relationship.source ===
-              selectedNode.id ||
-            relationship.target ===
-              selectedNode.id ||
-            relationship.source ===
-              actorId ||
-            relationship.target ===
-              actorId
+            relationship.source === selectedNode.id ||
+            relationship.target === selectedNode.id ||
+            relationship.source === actorId ||
+            relationship.target === actorId
         );
 
 
@@ -2155,38 +3229,226 @@ function App() {
       const connectedNodes =
         graph.nodes.filter(
           node =>
-            connectedIds.has(
-              node.id
-            ) ||
-            connectedIds.has(
-              node.properties?.id
-            )
+            connectedIds.has(node.id) ||
+            connectedIds.has(node.properties?.id)
         );
+
+
+      /*
+       * The intelligence graph stores multi-actor evidence on the
+       * relationship itself through evidence_types/shared_entities.
+       * Convert those relationship-level signals into the same local
+       * evidence shape used by the existing Actor Intelligence UI.
+       * This keeps the existing UI intact while making it understand
+       * the real Neo4j intelligence graph.
+       */
+      const relationshipEvidence = [];
+
+      const relationshipAssessments = [];
+
+      connectedLinks.forEach(
+        (relationship, relationshipIndex) => {
+
+          const evidenceTypes =
+            Array.isArray(relationship.evidence_types)
+              ? relationship.evidence_types
+              : Array.isArray(relationship.properties?.evidence_types)
+                ? relationship.properties.evidence_types
+                : [];
+
+          const sharedEntities =
+            Array.isArray(relationship.shared_entities)
+              ? relationship.shared_entities
+              : Array.isArray(relationship.properties?.shared_entities)
+                ? relationship.properties.shared_entities
+                : [];
+
+          const explanations =
+            Array.isArray(relationship.evidence_explanations)
+              ? relationship.evidence_explanations
+              : Array.isArray(relationship.properties?.evidence_explanations)
+                ? relationship.properties.evidence_explanations
+                : [];
+
+          evidenceTypes.forEach(
+            (signalType, evidenceIndex) => {
+
+              const normalizedSignal =
+                String(signalType || "").toLowerCase();
+
+              let entity =
+                sharedEntities[evidenceIndex] ||
+                sharedEntities.find(item => {
+                  const value = String(item || "").toLowerCase();
+                  return normalizedSignal.includes("alias") && value === value;
+                }) ||
+                "shared intelligence signal";
+
+              if (
+                normalizedSignal.includes("alias") &&
+                sharedEntities.length > 0
+              ) {
+                entity = sharedEntities.find(item =>
+                  explanations.some(explanation =>
+                    String(explanation).toLowerCase().includes("alias") &&
+                    String(explanation).toLowerCase().includes(String(item).toLowerCase())
+                  )
+                ) || entity;
+              }
+
+              if (
+                normalizedSignal.includes("infrastructure") &&
+                sharedEntities.length > 0
+              ) {
+                entity = sharedEntities.find(item =>
+                  explanations.some(explanation =>
+                    String(explanation).toLowerCase().includes("infrastructure") &&
+                    String(explanation).toLowerCase().includes(String(item).toLowerCase())
+                  )
+                ) || entity;
+              }
+
+              if (
+                normalizedSignal.includes("campaign") &&
+                sharedEntities.length > 0
+              ) {
+                entity = sharedEntities.find(item =>
+                  explanations.some(explanation =>
+                    String(explanation).toLowerCase().includes("campaign") &&
+                    String(explanation).toLowerCase().includes(String(item).toLowerCase())
+                  )
+                ) || entity;
+              }
+
+              if (
+                normalizedSignal.includes("stylometry") &&
+                sharedEntities.length > 0
+              ) {
+                entity = sharedEntities.find(item =>
+                  explanations.some(explanation =>
+                    String(explanation).toLowerCase().includes("stylometry") &&
+                    String(explanation).toLowerCase().includes(String(item).toLowerCase())
+                  )
+                ) || entity;
+              }
+
+              if (
+                normalizedSignal.includes("temporal") &&
+                sharedEntities.length > 0
+              ) {
+                entity = sharedEntities.find(item =>
+                  explanations.some(explanation =>
+                    String(explanation).toLowerCase().includes("temporal") &&
+                    String(explanation).toLowerCase().includes(String(item).toLowerCase())
+                  )
+                ) || entity;
+              }
+
+              relationshipEvidence.push({
+                id: `relationship-evidence-${relationshipIndex}-${evidenceIndex}`,
+                type: "evidence",
+                properties: {
+                  signal_type: signalType,
+                  entity_key: entity,
+                  confidence: Number(relationship.confidence || relationship.properties?.confidence || 0),
+                  explanation: explanations[evidenceIndex] || `Shared ${String(signalType).replaceAll("_", " ")}`,
+                  source: "neo4j-intelligence-graph",
+                  actor_id: actorId,
+                  related_actor: relationship.source === actorId || relationship.source === selectedNode.id
+                    ? relationship.target
+                    : relationship.source
+                }
+              });
+
+            }
+          );
+
+          const confidence = Number(
+            relationship.confidence ||
+            relationship.properties?.confidence ||
+            0
+          );
+
+          relationshipAssessments.push({
+            id: `relationship-assessment-${relationshipIndex}`,
+            type: "relationship_assessment",
+            properties: {
+              confidence,
+              relationship_type:
+                relationship.relationship_type ||
+                relationship.properties?.relationship_type ||
+                relationship.relationship ||
+                "intelligence_relationship",
+              evidence_types: evidenceTypes
+            }
+          });
+
+        }
+      );
 
 
       const connectedEvidence = [
         ...connectedNodes.filter(
           node => node.type === "evidence"
         ),
+        ...relationshipEvidence,
         ...liveEvidenceNodes.filter(
           node => String(node.properties?.actor_id || actorId) === String(actorId)
         )
       ];
 
 
-      const connectedAssessments =
-        connectedNodes.filter(
-          node =>
-            node.type ===
-            "relationship_assessment"
-        );
+      const connectedAssessments = [
+        ...connectedNodes.filter(
+          node => node.type === "relationship_assessment"
+        ),
+        ...relationshipAssessments
+      ];
 
 
       const connectedActors =
         connectedNodes.filter(
-          node =>
-            node.type === "actor"
+          node => node.type === "actor"
         );
+
+
+      const relationshipActorIds =
+        connectedLinks.map(
+          relationship =>
+            relationship.source === selectedNode.id ||
+            relationship.source === actorId
+              ? relationship.target
+              : relationship.source
+        );
+
+
+      relationshipActorIds.forEach(
+        relatedActorId => {
+
+          const existing =
+            connectedActors.some(
+              node =>
+                node.id === relatedActorId ||
+                node.properties?.id === relatedActorId
+            );
+
+          if (!existing) {
+
+            const relatedNode =
+              graph.nodes.find(
+                node =>
+                  node.id === relatedActorId ||
+                  node.properties?.id === relatedActorId
+              );
+
+            if (relatedNode) {
+              connectedActors.push(relatedNode);
+            }
+
+          }
+
+        }
+      );
 
 
       const signalTypes =
@@ -2195,8 +3457,7 @@ function App() {
             connectedEvidence
               .map(
                 node =>
-                  node.properties
-                    ?.signal_type
+                  node.properties?.signal_type
               )
               .filter(Boolean)
           )
@@ -2209,8 +3470,7 @@ function App() {
             connectedEvidence
               .map(
                 node =>
-                  node.properties
-                    ?.entity_key
+                  node.properties?.entity_key
               )
               .filter(Boolean)
           )
@@ -2222,24 +3482,20 @@ function App() {
           .map(
             node =>
               Number(
-                node.properties
-                  ?.confidence ||
+                node.properties?.confidence ||
                 0
               )
           )
           .filter(
-            value =>
-              value > 0
+            value => value > 0
           );
 
 
       const relationshipConfidence =
         relationshipConfidences.length > 0
-
           ? Math.max(
               ...relationshipConfidences
             )
-
           : 0;
 
 
@@ -2249,8 +3505,7 @@ function App() {
             connectedAssessments
               .map(
                 node =>
-                  node.properties
-                    ?.relationship_type
+                  node.properties?.relationship_type
               )
               .filter(Boolean)
           )
@@ -2258,13 +3513,9 @@ function App() {
 
 
       const aliases = [];
-
       const infrastructure = [];
-
       const campaigns = [];
-
       const wallets = [];
-
       const behaviors = [];
 
 
@@ -2273,77 +3524,46 @@ function App() {
 
           const signal =
             String(
-              evidence.properties
-                ?.signal_type ||
+              evidence.properties?.signal_type ||
               ""
             ).toLowerCase();
 
-
           const entity =
-            evidence.properties
-              ?.entity_key;
-
+            evidence.properties?.entity_key;
 
           if (!entity) {
             return;
           }
 
-
           if (
-            signal.includes(
-              "alias"
-            )
+            signal.includes("alias")
           ) {
-            aliases.push(
-              entity
-            );
+            aliases.push(entity);
           }
 
-
           if (
-            signal.includes(
-              "infrastructure"
-            )
+            signal.includes("infrastructure")
           ) {
-            infrastructure.push(
-              entity
-            );
+            infrastructure.push(entity);
           }
 
-
           if (
-            signal.includes(
-              "campaign"
-            )
+            signal.includes("campaign")
           ) {
-            campaigns.push(
-              entity
-            );
+            campaigns.push(entity);
           }
 
-
           if (
-            signal.includes(
-              "wallet"
-            )
+            signal.includes("wallet")
           ) {
-            wallets.push(
-              entity
-            );
+            wallets.push(entity);
           }
 
-
           if (
-            signal.includes(
-              "stylometry"
-            ) ||
-            signal.includes(
-              "temporal"
-            )
+            signal.includes("stylometry") ||
+            signal.includes("temporal")
           ) {
-            behaviors.push(
-              entity
-            );
+            behaviors.push(entity);
           }
 
         }
@@ -2355,57 +3575,40 @@ function App() {
         actorId,
 
         platform:
-          selectedNode.properties
-            ?.platform ||
+          selectedNode.properties?.platform ||
           "synthetic",
 
         username:
-          selectedNode.properties
-            ?.username ||
+          selectedNode.properties?.username ||
           "",
 
         connectedEvidence,
-
         connectedAssessments,
-
         connectedActors,
-
         signalTypes,
-
         entities,
 
         aliases: [
-          ...new Set(
-            aliases
-          )
+          ...new Set(aliases)
         ],
 
         infrastructure: [
-          ...new Set(
-            infrastructure
-          )
+          ...new Set(infrastructure)
         ],
 
         campaigns: [
-          ...new Set(
-            campaigns
-          )
+          ...new Set(campaigns)
         ],
 
         wallets: [
-          ...new Set(
-            wallets
-          )
+          ...new Set(wallets)
         ],
 
         behaviors: [
-          ...new Set(
-            behaviors
-          )
+          ...new Set(behaviors)
         ],
 
         relationshipTypes,
-
         relationshipConfidence,
 
         evidenceCount:
@@ -2421,7 +3624,6 @@ function App() {
       graph,
       liveEvidenceNodes
     ]);
-
 
   /* =====================================================
      LOAD WHAT-CHANGED + PREDICTION + ALERT INTELLIGENCE
@@ -4275,28 +5477,60 @@ function App() {
             INVESTIGATION
           </div>
 
-          <button className="nav-item active">
+          <button
+            className={`nav-item ${activeView === "overview" ? "active" : ""}`}
+            type="button"
+            onClick={() => navigateTo("overview")}
+          >
             ◉ Overview
           </button>
 
-          <button className="nav-item">
+          <button
+            className={`nav-item ${activeView === "actors" ? "active" : ""}`}
+            type="button"
+            onClick={() => navigateTo("actors", "actors-section")}
+          >
             ◉ Actors
           </button>
 
-          <button className="nav-item">
+          <button
+            className={`nav-item ${activeView === "evidence" ? "active" : ""}`}
+            type="button"
+            onClick={() => navigateTo("evidence", "evidence-section")}
+          >
             ◉ Evidence
           </button>
 
-          <button className="nav-item">
+          <button
+            className={`nav-item ${activeView === "campaigns" ? "active" : ""}`}
+            type="button"
+            onClick={() => navigateTo("campaigns", "campaigns-section")}
+          >
             ◉ Campaigns
           </button>
 
-          <button className="nav-item">
+          <button
+            className={`nav-item ${activeView === "timeline" ? "active" : ""}`}
+            type="button"
+            onClick={() => navigateTo("timeline", "timeline-section")}
+          >
             ◉ Timeline
           </button>
 
-          <button className="nav-item">
+          <button
+            className={`nav-item ${activeView === "predictions" ? "active" : ""}`}
+            type="button"
+            onClick={() => navigateTo("predictions", "predictions-section")}
+          >
             ◉ Predictions
+          </button>
+
+          <button
+            className={`nav-item ${activeView === "data-ingestion" ? "active" : ""}`}
+            type="button"
+            onClick={() => navigateTo("data-ingestion")}
+          >
+            ◉ Data Ingestion
           </button>
 
         </aside>
@@ -4312,7 +5546,7 @@ function App() {
               HERO
               ================================================= */}
 
-          <section className="hero">
+          <section id="overview-section" className="hero">
 
             <div>
 
@@ -4336,6 +5570,31 @@ function App() {
             </div>
 
           </section>
+
+
+          {showDataIngestion && (
+            <DataIngestionPanel
+              onClose={() => setShowDataIngestion(false)}
+              onInject={async (actorId, signalType) => {
+                /*
+                 * Reuse the same controlled-lab pipeline used by the
+                 * existing investigation UI. This keeps data ingestion
+                 * connected to live evidence, Neo4j persistence, graph
+                 * refresh, timeline state and the existing intelligence UI.
+                 */
+                await injectControlledActivity(
+                  signalType,
+                  actorId,
+                  true
+                );
+
+                return {
+                  status: "accepted",
+                  actor_id: actorId
+                };
+              }}
+            />
+          )}
 
 
           {error && (
@@ -4427,7 +5686,7 @@ function App() {
               INTELLIGENCE GRAPH
               ================================================= */}
 
-          <section className="graph-panel">
+          <section id="graph-section" className="graph-panel">
 
             <div className="panel-header">
 
@@ -4657,7 +5916,7 @@ function App() {
 
           {actorIntelligence && (
 
-            <section className="actor-investigation">
+            <section id="actors-section" className="actor-investigation">
 
               <div className="actor-investigation-header">
 
@@ -5705,7 +6964,7 @@ function App() {
 
                     {/* ACTIVITY TIMELINE */}
 
-                    <div
+                    <div id="timeline-section"
                       style={{
                         padding:
                           "20px"
@@ -6858,7 +8117,7 @@ function App() {
               </div>
 
               {/* EVIDENCE LEDGER + DIGITAL TWIN */}
-              <div
+              <div id="evidence-section"
                 style={{
                   display: "grid",
                   gridTemplateColumns: "repeat(2,minmax(0,1fr))",
@@ -7106,6 +8365,7 @@ function App() {
                   }}
                 >
                   <span
+                    id="campaigns-section"
                     style={{
                       color: "#66718a",
                       fontSize: "8px",
@@ -7501,6 +8761,7 @@ function App() {
 
           {actorIntelligence && (
             <section
+              id="predictions-section"
               className="panel"
               style={{
                 marginTop: "18px",
